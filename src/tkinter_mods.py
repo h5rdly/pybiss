@@ -87,12 +87,79 @@ class Window(tk.Tk):
         y = (self.winfo_screenheight() // 2) - (height // 2)
         self.geometry(f'+{x}+{y}')
 
+        # Zooming/Scaling 
+        self.zoom_level = 12 # Default baseline font size
+        
+        # Windows/Linux bindings
+        self.bind('<Control-MouseWheel>', self._on_mousewheel_zoom)
+        self.bind('<Control-plus>', self._zoom_in)
+        self.bind('<Control-equal>', self._zoom_in)
+        self.bind('<Control-minus>', self._zoom_out)
+        
+        # macOS/Linux specific scroll bindings
+        self.bind('<Control-Button-4>', self._zoom_in)
+        self.bind('<Control-Button-5>', self._zoom_out)
+
 
     def mainloop(self, *args, **kwargs):
         ''' Reveal the window only after everything is fully rendered '''
 
         self.deiconify()
         super().mainloop(*args, **kwargs)
+
+
+    def _on_mousewheel_zoom(self, event):
+        if event.delta > 0:
+            self._zoom_in()
+        else:
+            self._zoom_out()
+
+
+    def _zoom_in(self, event=None):
+        if self.zoom_level < 24: # Max font size
+            self.zoom_level += 1
+            self._apply_zoom(self)
+
+    def _zoom_out(self, event=None):
+        if self.zoom_level > 8: # Min font size
+            self.zoom_level -= 1
+            self._apply_zoom(self)
+
+
+    def _apply_zoom(self, widget):
+        ''' Recursively scales fonts down the widget tree '''
+
+        try:
+            # Check if the widget has a font configuration
+            current_font = widget.cget("font")
+            if current_font:
+                # If it's a string font (e.g. "Consolas 10"), split it
+                if isinstance(current_font, str):
+                    parts = current_font.split()
+                    family = parts[0]
+                    # Update to our new zoom level
+                    widget.configure(font=(family, self.zoom_level))
+                # If it's a tuple font (e.g. ('Segoe UI', 12, 'bold'))
+                elif isinstance(current_font, tuple):
+                    family = current_font[0]
+                    modifiers = current_font[2:] if len(current_font) > 2 else ()
+
+                    # keep headers proportionally larger
+                    if len(current_font) > 1 and int(current_font[1]) >= 18:
+                        widget.configure(font=(family, self.zoom_level + 8, *modifiers))
+                    else:
+                        widget.configure(font=(family, self.zoom_level, *modifiers))
+        
+        except Exception:
+            pass # Widget doesn't support font attribute (like a raw Frame)
+
+        # Recursively apply to all children
+        for child in widget.winfo_children():
+            self._apply_zoom(child)
+            
+        # Special case for our Custom Canvas Buttons which store text differently
+        if isinstance(widget, Button):
+            widget.itemconfig(widget.text_id, font=('Segoe UI', self.zoom_level, 'bold'))
 
 
 class MessageBox:
@@ -135,7 +202,7 @@ class MessageBox:
                 
             bg_col = Theme.PRIMARY if is_primary else Theme.BG
             hov_col = Theme.HOVER if is_primary else Theme.BORDER
-            ModernButton(btn_frame, text=btn_text, command=on_click, width=100, 
+            Button(btn_frame, text=btn_text, command=on_click, width=100, 
                          fg_color=bg_col, hover_color=hov_col).pack(side='left', padx=10)
             
         dialog.wait_window()
@@ -263,6 +330,7 @@ class Entry(tk.Frame):
 class Frame(tk.Frame):
 
     def __init__(self, master, width=400, height=200, corner_radius=10):
+
         super().__init__(master, bg=Theme.BG)
         self.canvas = tk.Canvas(self, width=width, height=height, bg=Theme.BG, highlightthickness=0)
         self.canvas.pack(fill='both', expand=True)
@@ -271,3 +339,100 @@ class Frame(tk.Frame):
         # A flat frame inside the canvas to hold child widgets (like Listbox/Text)
         self.inner = tk.Frame(self, bg=Theme.SURFACE)
         self.inner.place(relx=0.02, rely=0.02, relwidth=0.96, relheight=0.96)
+
+
+class Checkbox(tk.Frame):
+    
+    def __init__(self, master, text="", command=None, checked=False):
+
+        super().__init__(master, bg=Theme.BG)
+        self.command = command
+        self.is_checked = checked
+        
+        # 24x24 canvas for the box
+        self.canvas = tk.Canvas(self, width=24, height=24, bg=Theme.BG, highlightthickness=0)
+        self.canvas.pack(side="left", padx=(0, 10))
+        
+        self.label = tk.Label(self, text=text, bg=Theme.BG, fg=Theme.TEXT, font=Theme.FONT)
+        self.label.pack(side="left")
+        
+        # Bind clicks on both the box and the label
+        self.canvas.bind("<Button-1>", self.toggle)
+        self.label.bind("<Button-1>", self.toggle)
+        
+        self._draw()
+
+    def _draw(self):
+        self.canvas.delete("all")
+        if self.is_checked:
+            # Filled Blue box
+            draw_rounded_rect(self.canvas, 2, 2, 22, 22, 6, fill=Theme.PRIMARY, outline="")
+            # Draw the checkmark (V-shape)
+            self.canvas.create_line(7, 12, 11, 16, 17, 7, fill=Theme.TEXT, width=2, capstyle=tk.ROUND, joinstyle=tk.ROUND)
+        else:
+            # Empty Grey outline
+            draw_rounded_rect(self.canvas, 2, 2, 22, 22, 6, fill=Theme.BG, outline=Theme.BORDER, width=2)
+
+    def get(self) -> bool:
+        return self.is_checked
+
+    def set(self, state: bool):
+        self.is_checked = state
+        self._draw()
+
+
+    def toggle(self, event=None):
+
+        self.is_checked = not self.is_checked
+        self._draw()
+        if self.command:
+            self.command(self.is_checked)
+            
+
+class Toggle(tk.Frame):
+    
+    def __init__(self, master, text="", command=None, is_on=False):
+
+        super().__init__(master, bg=Theme.BG)
+        self.command = command
+        self.is_on = is_on
+        
+        # 40x20 canvas for the switch track
+        self.canvas = tk.Canvas(self, width=44, height=24, bg=Theme.BG, highlightthickness=0)
+        self.canvas.pack(side="left", padx=(0, 10))
+        
+        self.label = tk.Label(self, text=text, bg=Theme.BG, fg=Theme.TEXT, font=Theme.FONT)
+        self.label.pack(side="left")
+        
+        self.canvas.bind("<Button-1>", self.toggle)
+        self.label.bind("<Button-1>", self.toggle)
+        
+        self._draw()
+
+    def _draw(self):
+
+        self.canvas.delete("all")
+        
+        # Draw the track
+        track_color = Theme.PRIMARY if self.is_on else Theme.SURFACE
+        draw_rounded_rect(self.canvas, 2, 2, 42, 22, 10, fill=track_color, outline="")
+        
+        # Draw the thumb (the circle)
+        # If ON, position it on the right. If OFF, position on the left.
+        thumb_x = 22 if self.is_on else 4
+        self.canvas.create_oval(thumb_x, 4, thumb_x + 16, 20, fill=Theme.TEXT, outline="")
+
+
+    def toggle(self, event=None):
+
+        self.is_on = not self.is_on
+        self._draw() 
+        if self.command:
+            self.command(self.is_on)
+            
+    def get(self) -> bool:
+        return self.is_on
+
+    def set(self, state: bool):
+        self.is_on = state
+        self._draw()

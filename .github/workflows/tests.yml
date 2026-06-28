@@ -1,0 +1,57 @@
+name: Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # Linux, Windows, MacOS
+  test-standard:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python-version: ['3.13', '3.14', '3.14t']
+
+    steps:
+      - uses: actions/checkout@v6
+      
+      - uses: actions/setup-python@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          allow-prereleases: ${{ endsWith(matrix.python-version, 't') }}
+
+      - name: Run tests
+        run: python -m unittest discover tests
+
+  # Alpine Linux (Musl) 
+  test-alpine:
+    name: Test (Alpine/Musl)
+    runs-on: ubuntu-latest
+    container:
+      image: python:3.14-alpine
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run tests
+        run: python -m unittest discover tests
+
+  # FreeBSD 
+  test-freebsd:
+    name: Test (FreeBSD)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Test in FreeBSD VM
+        uses: vmactions/freebsd-vm@v1
+        with:
+          release: "14.4"
+          usesh: true
+          prepare: pkg install -y python314
+          run: |
+            python3.14 -m unittest discover tests

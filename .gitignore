@@ -2,5 +2,7 @@
 # !assets/*.dll
 # !assets/*.dylib
 
+*.pyc
 *.key
 *.pem
+*.so

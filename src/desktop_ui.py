@@ -5,7 +5,8 @@ sys.path.append(__file__.rsplit('/', 1)[0])
 
 
 from src.tkinter_mods import (
-    Theme, Window, Button, Frame, Scrollbar, MessageBox, set_dark_titlebar
+    Theme, Window, Button, Frame, Scrollbar, MessageBox, Toggle, Label, 
+    set_dark_titlebar
 )
 from src.locale import _
 from src.config import config
@@ -41,7 +42,7 @@ class DesktopDashboard(Window):
     # --- Layout Architecture ---
 
     def _build_sidebar(self):
-        ''' A modern dark sidebar for navigation '''
+        
         self.sidebar = tk.Frame(self, bg='#1E1E1E', width=200)
         self.sidebar.pack(side='left', fill='y')
         self.sidebar.pack_propagate(False)
@@ -246,41 +247,50 @@ class DesktopDashboard(Window):
     def _build_settings_view(self):
 
         frame = tk.Frame(self.main_container, bg=Theme.BG)
-        self.views['settings'] = frame
+        self.views["settings"] = frame
 
-        tk.Label(frame, text=_('tray_language'), font=('Segoe UI', 20, 'bold'), 
-                 bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(35, 20))
+        tk.Label(frame, text=_("tray_language"), font=("Segoe UI", 20, "bold"), 
+                 bg=Theme.BG, fg=Theme.TEXT).pack(anchor="w", padx=35, pady=(35, 20))
 
-        # --- Language Segmented Control ---
+        # Language Segmented Control 
         lang_frame = tk.Frame(frame, bg=Theme.BG)
-        lang_frame.pack(anchor='w', padx=35)
+        lang_frame.pack(anchor="w", padx=35)
         
-        self.btn_en = Button(lang_frame, 'English (EN)', lambda: self.set_lang('en'), width=130)
-        self.btn_en.pack(side='left', padx=(0, 5))
+        self.btn_en = Button(lang_frame, "English (EN)", lambda: self.set_lang("en"), width=130)
+        self.btn_en.pack(side="left", padx=(0, 5))
         
-        self.btn_bg = Button(lang_frame, 'Български (BG)', lambda: self.set_lang('bg'), width=130)
-        self.btn_bg.pack(side='left')
+        self.btn_bg = Button(lang_frame, "Български (BG)", lambda: self.set_lang("bg"), width=130)
+        self.btn_bg.pack(side="left")
 
-        # --- Provider Segmented Control ---
-        tk.Label(frame, text=_('tray_sign_api'), font=('Segoe UI', 20, 'bold'), 
-                 bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(45, 20))
+        # Provider Segmented Control 
+        tk.Label(frame, text=_("tray_sign_api"), font=("Segoe UI", 20, "bold"), 
+                 bg=Theme.BG, fg=Theme.TEXT).pack(anchor="w", padx=35, pady=(40, 20))
 
         api_frame = tk.Frame(frame, bg=Theme.BG)
-        api_frame.pack(anchor='w', padx=35)
+        api_frame.pack(anchor="w", padx=35)
         
-        self.btn_p11 = Button(api_frame, 'Hardware (PKCS11)', lambda: self.set_api('PKCS11'), width=160)
-        self.btn_p11.pack(side='left', padx=(0, 5))
+        self.btn_p11 = Button(api_frame, "Hardware (PKCS11)", lambda: self.set_api("PKCS11"), width=160)
+        self.btn_p11.pack(side="left", padx=(0, 5))
         
-        self.btn_p12 = Button(api_frame, 'Software (PKCS12)', lambda: self.set_api('PKCS12'), width=160)
-        self.btn_p12.pack(side='left')
+        self.btn_p12 = Button(api_frame, "Software (PKCS12)", lambda: self.set_api("PKCS12"), width=160)
+        self.btn_p12.pack(side="left")
+
+        # System Settings
+        tk.Label(frame, text="System", font=("Segoe UI", 20, "bold"), 
+                 bg=Theme.BG, fg=Theme.TEXT).pack(anchor="w", padx=35, pady=(40, 20))
+                 
+        is_boot_on = config.get_bool("osStarted", fallback=True)
+        self.toggle_boot = Toggle(frame, text="Launch PyBISS on System Startup", 
+                                  is_on=is_boot_on, command=self.save_boot_setting)
+        self.toggle_boot.pack(anchor="w", padx=35, pady=(0, 20))
 
         # Initialize visuals based on config
-        self.set_lang(config.get('language', 'en'), save=False)
-        self.set_api(config.get('signAPI', 'PKCS11'), save=False)
+        self.set_lang(config.get("language", "en"), save=False)
+        self.set_api(config.get("signAPI", "PKCS11"), save=False)
 
         # Factory Reset
-        Button(frame, _('tray_default'), self.factory_reset, fg_color=Theme.DANGER, 
-                     hover_color=Theme.DANGER_HOVER, width=160).pack(anchor='w', padx=35, pady=(70, 0))
+        Button(frame, _("tray_default"), self.factory_reset, fg_color=Theme.DANGER, 
+                     hover_color=Theme.DANGER_HOVER, width=160).pack(anchor="w", padx=35, pady=(30, 0))
 
     # --- UI Logic & State ---
 
@@ -294,6 +304,7 @@ class DesktopDashboard(Window):
         self.btn_en._draw()
         self.btn_bg._draw()
 
+
     def set_api(self, api, save=True):
         if save: 
             config.set('signAPI', api)
@@ -301,6 +312,7 @@ class DesktopDashboard(Window):
         self.btn_p12.fg_color = Theme.PRIMARY if api == 'PKCS12' else Theme.SURFACE
         self.btn_p11._draw()
         self.btn_p12._draw()
+
 
     def factory_reset(self):
         if MessageBox.askyesno('Factory Reset', 'Are you sure you want to restore default settings?'):
@@ -310,6 +322,13 @@ class DesktopDashboard(Window):
             config.set('pfxPath', '')
             self.set_lang('en', save=False)
             self.set_api('PKCS11', save=False)
+
+
+    def save_boot_setting(self, is_on: bool):
+
+        config.set("osStarted", str(is_on))
+        self.log_to_dashboard(f"[*] Run on startup set to: {is_on}")
+
 
     # --- Logging Logic ---
 

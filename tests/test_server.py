@@ -1,8 +1,10 @@
-import asyncio, json, sys, unittest
+import asyncio, json, sys, unittest, logging
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
 from src.server import Request, CORS, MiniServer
+
+logging.getLogger().setLevel(logging.CRITICAL) # Hide the deliberate error traceback
 
 
 # -- Mock Async Streams 
