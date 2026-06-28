@@ -1,0 +1,13 @@
+[project]
+name = "pybiss"
+version = "0.1.0"
+description = "Unofficial BISS implementation in Python. Fast, modern, self contained"
+readme = "Readme.md"
+requires-python = ">=3.13"
+dependencies = [] 
+
+
+[project.scripts]
+# pybiss-server = "src.app:app.run"
+# pybiss-tui = "src.tui:run_tui"
+# pybiss-gui = "src.desktop_ui:main"

@@ -1,0 +1,6 @@
+# !assets/*.so
+# !assets/*.dll
+# !assets/*.dylib
+
+*.key
+*.pem
