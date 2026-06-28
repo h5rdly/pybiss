@@ -1,5 +1,6 @@
 import sys
-from ctypes import (pointer, string_at, memmove, c_ubyte, c_ulong, POINTER, CFUNCTYPE
+from ctypes import (cast, pointer, string_at, memmove, c_ubyte, c_ulong, POINTER, CFUNCTYPE,
+    addressof, c_uint32, c_void_p, create_string_buffer, c_int, 
 )
 
 
@@ -16,6 +17,7 @@ from src.pkcs11_funcs import (
     C_Sign_t, C_GetSlotList_t, C_Logout_t, C_CloseSession_t, C_Finalize_t,
     C_GetTokenInfo_t, C_InitPIN_t, C_SetPIN_t, C_CreateObject_t, C_GenerateKeyPair_t
 )
+import src.mscapi as mscapi
 
 
 class FakePkcs11Token:
@@ -274,3 +276,120 @@ class MockLoader:
         # Attach the callable CFUNCTYPE object, NOT the integer from the struct
         lib.C_GetFunctionList = self.mock_c_get_func_list
         return lib
+
+
+class FakeMSCAPI:
+    ''' A stateful fake representing the Windows CNG and Legacy CryptoAPI '''
+
+    def __init__(self):
+        self.acquire_should_fail = False
+        self.is_legacy_csp = False
+        self.set_property_fail = False
+        self.enum_count = 0
+        
+        self.last_pin_bytes = None
+        self.contexts_freed = 0
+        
+        # Allocate raw memory for the fake certificate
+        self.mock_cert_data = b'der_certificate_data'
+        self.cert_buffer = create_string_buffer(self.mock_cert_data)
+        
+        # Build the C-Struct and point it at the allocated memory
+        self.mock_ctx = mscapi.CERT_CONTEXT()
+        self.mock_ctx.cbCertEncoded = len(self.mock_cert_data)
+        self.mock_ctx.pbCertEncoded = cast(self.cert_buffer, c_void_p)
+        
+        # Create strong C-Function Pointers to our Python methods
+        self.cb_CertOpenStore = CFUNCTYPE(
+            c_void_p, c_uint32, c_uint32, c_void_p, c_uint32, c_void_p
+        )(self._CertOpenStore)
+        
+        self.cb_CertEnumCertificatesInStore = CFUNCTYPE(
+            c_void_p, c_void_p, c_void_p
+        )(self._CertEnumCertificatesInStore)
+        
+        self.cb_CertDuplicateCertificateContext = CFUNCTYPE(
+            c_void_p, c_void_p
+        )(self._CertDuplicateCertificateContext)
+        
+        self.cb_CertFreeCertificateContext = CFUNCTYPE(
+            c_int, c_void_p
+        )(self._CertFreeCertificateContext)
+        
+        self.cb_CertCloseStore = CFUNCTYPE(
+            c_int, c_void_p, c_uint32
+        )(self._CertCloseStore)
+        
+        self.cb_CryptAcquireCertificatePrivateKey = CFUNCTYPE(
+            c_int, c_void_p, c_uint32, c_void_p, 
+            POINTER(c_void_p), POINTER(c_uint32), POINTER(c_int)
+        )(self._CryptAcquireCertificatePrivateKey)
+        
+        self.cb_CryptReleaseContext = CFUNCTYPE(
+            c_int, c_void_p, c_uint32
+        )(self._CryptReleaseContext)
+        
+        self.cb_NCryptSetProperty = CFUNCTYPE(
+            c_uint32, c_void_p, c_void_p, c_void_p, c_uint32, c_uint32
+        )(self._NCryptSetProperty)
+        
+        self.cb_NCryptSignHash = CFUNCTYPE(
+            c_uint32, c_void_p, c_void_p, c_void_p, c_uint32, 
+            c_void_p, c_uint32, POINTER(c_uint32), c_uint32
+        )(self._NCryptSignHash)
+        
+        self.cb_NCryptFreeObject = CFUNCTYPE(
+            c_uint32, c_void_p
+        )(self._NCryptFreeObject)
+
+    def _CertOpenStore(self, prov, enc, hProv, flags, para):
+        if prov == 0: return 0 
+        return 12345
+
+    def _CertEnumCertificatesInStore(self, hStore, pPrev):
+        if self.enum_count == 0:
+            self.enum_count += 1
+            return addressof(self.mock_ctx)
+        return 0
+
+    def _CertDuplicateCertificateContext(self, pCert):
+        return 99999
+
+    def _CertFreeCertificateContext(self, pCert):
+        self.contexts_freed += 1
+        return 1
+
+    def _CertCloseStore(self, hStore, flags):
+        return 1
+
+    def _CryptAcquireCertificatePrivateKey(self, pCert, flags, pvReserved, phProv, pdwKeySpec, pfCallerFreeProv):
+        if self.acquire_should_fail:
+            return 0
+        phProv[0] = 55555
+        pdwKeySpec[0] = 1 if self.is_legacy_csp else 0xFFFFFFFF
+        pfCallerFreeProv[0] = 1
+        return 1
+        
+    def _CryptReleaseContext(self, hProv, flags):
+        return 1
+
+    def _NCryptSetProperty(self, hObj, pszProp, pbInput, cbInput, flags):
+        if self.set_property_fail:
+            return 1
+        self.last_pin_bytes = string_at(pbInput, cbInput)
+        return 0
+
+    def _NCryptSignHash(self, hProv, pPadInfo, pbHash, cbHash, pbSig, cbSig, pcbResult, flags):
+        if not pbSig:
+            pcbResult[0] = 256
+            return 0
+        pcbResult[0] = 256
+        return 0
+
+    def _NCryptFreeObject(self, hObj):
+        return 0
+
+
+class DummyWindowsLibrary:
+    ''' Simple object to hold function attributes for Windows DLL mocking '''
+    pass
