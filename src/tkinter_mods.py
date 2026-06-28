@@ -126,6 +126,13 @@ class Window(tk.Tk):
             self._apply_zoom(self)
 
 
+    @property
+    def ui_scale(self):
+        ''' Convert the baseline font size (12) into a layout multiplier (e.g. 1.5x) '''
+        
+        return self.zoom_level / 12.0
+
+
     def _apply_zoom(self, widget):
         ''' Recursively scales fonts down the widget tree '''
 
@@ -156,11 +163,11 @@ class Window(tk.Tk):
         # Recursively apply to all children
         for child in widget.winfo_children():
             self._apply_zoom(child)
-            
-        # Special case for our Custom Canvas Buttons which store text differently
-        if isinstance(widget, Button):
-            widget.itemconfig(widget.text_id, font=('Segoe UI', self.zoom_level, 'bold'))
 
+        # Trigger a physical redraw if the widget has one
+        if hasattr(widget, '_draw'):
+            widget._draw()
+        
 
 class MessageBox:
     
@@ -283,13 +290,25 @@ class Button(tk.Canvas):
         self.bind('<Button-1>', self._on_click)
         self.bind('<ButtonRelease-1>', self._on_release)
 
+
     def _draw(self, event=None):
+        
         self.delete('all')
         w, h = self.winfo_width(), self.winfo_height()
-        self.rect_id = draw_rounded_rect(self, 0, 0, w, h, self.corner_radius, fill=self.fg_color)
-        self.text_id = self.create_text(w/2, h/2, text=self.master.tk.call('set', 'text', self.winfo_id()) if not hasattr(self, 'text') else self.text, 
-                                        fill=Theme.TEXT, font=('Segoe UI', 11, 'bold'))
-        self.text = self.itemcget(self.text_id, 'text') # Store for resize
+        
+        # Skip drawing if window hasn't assigned layout dimensions yet
+        if w <= 1 or h <= 1: return 
+        
+        s = self.winfo_toplevel().ui_scale
+        radius = self.corner_radius * s
+        
+        self.rect_id = draw_rounded_rect(self, 0, 0, w, h, radius, fill=self.fg_color)
+        
+        text_str = self.master.tk.call('set', 'text', self.winfo_id()) if not hasattr(self, 'text') else self.text
+        self.text_id = self.create_text(w/2, h/2, text=text_str, fill=Theme.TEXT, 
+                                        font=('Segoe UI', int(11*s), 'bold'))
+        self.text = self.itemcget(self.text_id, 'text')
+
 
     def _on_enter(self, event):
         self.itemconfig(self.rect_id, fill=self.hover_color)
@@ -363,15 +382,17 @@ class Checkbox(tk.Frame):
         self._draw()
 
     def _draw(self):
+
         self.canvas.delete("all")
+        s = self.winfo_toplevel().ui_scale 
+        self.canvas.configure(width=24*s, height=24*s)
+        
         if self.is_checked:
-            # Filled Blue box
-            draw_rounded_rect(self.canvas, 2, 2, 22, 22, 6, fill=Theme.PRIMARY, outline="")
-            # Draw the checkmark (V-shape)
-            self.canvas.create_line(7, 12, 11, 16, 17, 7, fill=Theme.TEXT, width=2, capstyle=tk.ROUND, joinstyle=tk.ROUND)
+            draw_rounded_rect(self.canvas, 2*s, 2*s, 22*s, 22*s, 6*s, fill=Theme.PRIMARY, outline="")
+            self.canvas.create_line(7*s, 12*s, 11*s, 16*s, 17*s, 7*s, fill=Theme.TEXT, width=max(2, 2*s), capstyle=tk.ROUND, joinstyle=tk.ROUND)
         else:
-            # Empty Grey outline
-            draw_rounded_rect(self.canvas, 2, 2, 22, 22, 6, fill=Theme.BG, outline=Theme.BORDER, width=2)
+            draw_rounded_rect(self.canvas, 2*s, 2*s, 22*s, 22*s, 6*s, fill=Theme.BG, outline=Theme.BORDER, width=max(2, 2*s))
+
 
     def get(self) -> bool:
         return self.is_checked
@@ -413,14 +434,19 @@ class Toggle(tk.Frame):
 
         self.canvas.delete("all")
         
+        # Grab the current zoom multiplier from the main window
+        s = self.winfo_toplevel().ui_scale 
+        
+        # Dynamically scale the Canvas container
+        self.canvas.configure(width=44*s, height=24*s)
+        
         # Draw the track
         track_color = Theme.PRIMARY if self.is_on else Theme.SURFACE
-        draw_rounded_rect(self.canvas, 2, 2, 42, 22, 10, fill=track_color, outline="")
+        draw_rounded_rect(self.canvas, 2*s, 2*s, 42*s, 22*s, 10*s, fill=track_color, outline="")
         
-        # Draw the thumb (the circle)
-        # If ON, position it on the right. If OFF, position on the left.
-        thumb_x = 22 if self.is_on else 4
-        self.canvas.create_oval(thumb_x, 4, thumb_x + 16, 20, fill=Theme.TEXT, outline="")
+        # Draw the thumb
+        thumb_x = 22*s if self.is_on else 4*s
+        self.canvas.create_oval(thumb_x, 4*s, thumb_x + 16*s, 20*s, fill=Theme.TEXT, outline="")
 
 
     def toggle(self, event=None):
