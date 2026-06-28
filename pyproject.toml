@@ -6,6 +6,8 @@ readme = "Readme.md"
 requires-python = ">=3.13"
 dependencies = [] 
 
+[project.urls]
+Homepage = "https://github.com/h5rdly/pybiss"
 
 [project.scripts]
 # pybiss-server = "src.app:app.run"
