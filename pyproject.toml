@@ -1,6 +1,6 @@
 [project]
 name = "pybiss"
-version = "0.1.0"
+version = "0.0.1"
 description = "Unofficial BISS implementation in Python. Fast, modern, self contained"
 readme = "Readme.md"
 requires-python = ">=3.13"
