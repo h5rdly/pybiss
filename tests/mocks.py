@@ -11,7 +11,7 @@ from src.pkcs11_types import (
     CKO_PRIVATE_KEY, CKA_LABEL 
 )
 from src.pkcs11_funcs import (
-    CK_FUNCTION_LIST, C_SignInit_t,
+    CK_FUNCTION_LIST, C_SignInit_t, C_DestroyObject_t,
     C_Initialize_t, C_OpenSession_t, C_Login_t, C_FindObjectsInit_t, 
     C_FindObjects_t, C_FindObjectsFinal_t, C_GetAttributeValue_t, 
     C_Sign_t, C_GetSlotList_t, C_Logout_t, C_CloseSession_t, C_Finalize_t,
@@ -58,6 +58,7 @@ class FakePkcs11Token:
         self.cb_C_SetPIN = C_SetPIN_t(self.mock_C_SetPIN)
         self.cb_C_InitPIN = C_InitPIN_t(self.mock_C_InitPIN)
         self.cb_C_CreateObject = C_CreateObject_t(self.mock_C_CreateObject)
+        self.cb_C_DestroyObject = C_DestroyObject_t(self.mock_C_DestroyObject) 
         self.cb_C_GenerateKeyPair = C_GenerateKeyPair_t(self.mock_C_GenerateKeyPair)
 
         # Now assign the strongly-referenced callbacks to the struct
@@ -79,6 +80,7 @@ class FakePkcs11Token:
         self.f.C_SetPIN = self.cb_C_SetPIN
         self.f.C_InitPIN = self.cb_C_InitPIN
         self.f.C_CreateObject = self.cb_C_CreateObject
+        self.f.C_DestroyObject = self.cb_C_DestroyObject 
         self.f.C_GenerateKeyPair = self.cb_C_GenerateKeyPair
 
     def mock_C_SignInit(self, hSession, pMechanism, hKey):
@@ -111,6 +113,10 @@ class FakePkcs11Token:
         self.is_initialized = False
         return CKR_OK
 
+    def mock_C_DestroyObject(self, hSession, hObject):
+        # In a real token, this physically deletes the object from the card's memory
+        return CKR_OK
+        
     def mock_C_FindObjectsInit(self, hSession, pTemplate, ulCount):
         self.find_index = 0
         return CKR_OK

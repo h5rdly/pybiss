@@ -4,11 +4,11 @@ from mocks import MockLoader
 
 sys.path.append(f'{__file__.rsplit("/", 2)[0]}')
 
-from src.pkcs11_types import CKR_OK
+from src.pkcs11_types import CKR_OK, CKO_CERTIFICATE
 from src.hardware import ( 
     load_pkcs11, sign_payload, get_slots, get_certificates, get_token_serial_number, 
     change_card_pin, unblock_card_pin, generate_rsa_keypair, generate_spkac, write_certificate, 
-    LIBCVP11_PATH
+    get_token_info_extended, delete_object_by_label, LIBCVP11_PATH
 )
 
 
@@ -253,6 +253,56 @@ class TestHardware(unittest.TestCase):
         assert len(spkac_out) > 64
         
         # Ensure all ephemeral sessions opened inside generate_spkac were safely closed
+        assert not self.token_state.session_open
+        assert not self.token_state.logged_in
+
+
+    def test_get_token_info_extended_success(self):
+        ''' Tests extracting all token memory/model info via C_GetTokenInfo natively '''
+        
+        info = get_token_info_extended(self.funcs, slot_id=1)
+        
+        # Validates against the C_GetTokenInfo_t mock we built in FakePkcs11Token
+        assert info["serialNumber"] == "987654321"
+        # The mock doesn't set the other fields, so they default to 0/empty in ctypes
+        assert "ulFreePublicMemory" in info
+        assert "label" in info
+        
+        # Ensure session cleanup ran
+        assert not self.token_state.is_initialized
+
+
+    def test_delete_object_by_label_success(self):
+        ''' Tests the lookup, login, and destruction flow of a specific CKA_LABEL '''
+        
+        # Inject our Fake Token with a mock certificate that has a matching label
+        self.token_state.mock_certs = [{'handle': 888, 'id': b'ID_2', 'der': b'DER_DATA'}]
+        
+        # Attempt to delete the object by its Class and Label
+        result = delete_object_by_label(
+            self.funcs, slot_id=1, pin="1234", object_class=CKO_CERTIFICATE, label="Mock Label")
+        
+        # Should return True because an object was found and deleted
+        assert result is True
+        
+        # Critical: Ensure the session was safely closed after deletion
+        assert not self.token_state.session_open
+        assert not self.token_state.logged_in
+
+
+    def test_delete_object_by_label_not_found(self):
+        ''' Tests that deleting a missing object safely returns False instead of crashing '''
+                
+        # Override the mock token to contain zero certificates
+        self.token_state.mock_certs = []
+        
+        result = delete_object_by_label(
+            self.funcs, slot_id=1, pin="1234", object_class=CKO_CERTIFICATE, label="Nonexistent Label")
+        
+        # Should return False because no object matched
+        assert result is False
+        
+        # Ensure cleanup still ran
         assert not self.token_state.session_open
         assert not self.token_state.logged_in
 

@@ -21,6 +21,7 @@ C_CloseSession_t = CFUNCTYPE(CK_RV, CK_SESSION_HANDLE)
 C_Login_t = CFUNCTYPE(CK_RV, CK_SESSION_HANDLE, CK_USER_TYPE, POINTER(CK_BYTE), CK_ULONG)
 C_Logout_t = CFUNCTYPE(CK_RV, CK_SESSION_HANDLE)
 C_CreateObject_t = CFUNCTYPE(CK_RV, CK_SESSION_HANDLE, POINTER(CK_ATTRIBUTE), CK_ULONG, POINTER(CK_OBJECT_HANDLE))
+C_DestroyObject_t = CFUNCTYPE(CK_RV, CK_SESSION_HANDLE, CK_OBJECT_HANDLE)
 C_GetAttributeValue_t = CFUNCTYPE(CK_RV, CK_SESSION_HANDLE, CK_OBJECT_HANDLE, POINTER(CK_ATTRIBUTE), CK_ULONG)
 C_FindObjectsInit_t = CFUNCTYPE(CK_RV, CK_SESSION_HANDLE, POINTER(CK_ATTRIBUTE), CK_ULONG)
 C_FindObjects_t = CFUNCTYPE(CK_RV, CK_SESSION_HANDLE, POINTER(CK_OBJECT_HANDLE), CK_ULONG, POINTER(CK_ULONG))
@@ -58,9 +59,9 @@ class CK_FUNCTION_LIST(Structure):
         ('C_Logout', C_Logout_t),
         ('C_CreateObject', C_CreateObject_t),
         ('C_CopyObject', c_void_p),
-        ('C_DestroyObject', c_void_p),
+        ('C_DestroyObject', C_DestroyObject_t),
         ('C_GetObjectSize', c_void_p),
-        ('C_GetAttributeValue', C_GetAttributeValue_t), # FIXED ALIGNMENT
+        ('C_GetAttributeValue', C_GetAttributeValue_t), 
         ('C_SetAttributeValue', c_void_p),
         ('C_FindObjectsInit', C_FindObjectsInit_t),
         ('C_FindObjects', C_FindObjects_t),

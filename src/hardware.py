@@ -457,6 +457,76 @@ def get_slots(funcs, token_present: bool = True) -> list[int]:
         funcs.C_Finalize(None)
 
 
+def get_token_info_extended(funcs, slot_id: int) -> dict:
+    ''' Returns the full hardware specs for /getInfo '''
+
+    funcs.C_Initialize(None)
+    try:
+        token_info = CK_TOKEN_INFO()
+        res = funcs.C_GetTokenInfo(slot_id, byref(token_info))
+        if res != CKR_OK: raise Exception(f"C_GetTokenInfo failed: {hex(res)}")
+        
+        return {
+            "label": bytes(token_info.label).decode('utf-8', errors='ignore').strip(),
+            "manufacturerID": bytes(token_info.manufacturerID).decode('utf-8', errors='ignore').strip(),
+            "model": bytes(token_info.model).decode('utf-8', errors='ignore').strip(),
+            "serialNumber": bytes(token_info.serialNumber).decode('utf-8', errors='ignore').strip(),
+            "ulFreePublicMemory": token_info.ulFreePublicMemory,
+            "ulTotalPublicMemory": token_info.ulTotalPublicMemory,
+            "ulFreePrivateMemory": token_info.ulFreePrivateMemory,
+            "ulTotalPrivateMemory": token_info.ulTotalPrivateMemory
+        }
+    finally:
+        funcs.C_Finalize(None)
+
+
+def delete_object_by_label(funcs, slot_id: int, pin: str, object_class: int, label: str) -> bool:
+    ''' C_DestroyObject: Removes all objects of a given class matching a label. Returns True if objects were deleted '''
+    
+    funcs.C_Initialize(None)
+    session = CK_SESSION_HANDLE()
+    res = funcs.C_OpenSession(slot_id, CKF_SERIAL_SESSION | CKF_RW_SESSION, None, None, byref(session))
+    if res != CKR_OK: raise Exception(f"Failed to open session: {hex(res)}")
+    
+    try:
+        pin_bytes = pin.encode('utf-8')
+        pin_array = (CK_BYTE * len(pin_bytes))(*pin_bytes)
+        res = funcs.C_Login(session, CKU_USER, pin_array, len(pin_bytes))
+        if res != CKR_OK and res != 0x00000100: raise Exception(f"C_Login failed: {hex(res)}")
+
+        # Search for objects by Class and Label
+        class_val = CK_ULONG(object_class)
+        label_bytes = label.encode('utf-8')
+        label_arr = (CK_BYTE * len(label_bytes))(*label_bytes)
+        
+        search_template = (CK_ATTRIBUTE * 2)()
+        search_template[0].type, search_template[0].pValue, search_template[0].ulValueLen = CKA_CLASS, cast(byref(class_val), c_void_p), sizeof(CK_ULONG)
+        search_template[1].type, search_template[1].pValue, search_template[1].ulValueLen = CKA_LABEL, cast(byref(label_arr), c_void_p), len(label_bytes)
+        
+        res = funcs.C_FindObjectsInit(session, search_template, 2)
+        if res != CKR_OK: raise Exception(f"C_FindObjectsInit failed: {hex(res)}")
+        
+        deleted_any = False
+        while True:
+            obj_handle = CK_OBJECT_HANDLE()
+            obj_count = CK_ULONG()
+            res = funcs.C_FindObjects(session, byref(obj_handle), 1, byref(obj_count))
+            
+            if res != CKR_OK or obj_count.value == 0:
+                break
+                
+            funcs.C_DestroyObject(session, obj_handle)
+            deleted_any = True
+            
+        funcs.C_FindObjectsFinal(session)
+        return deleted_any
+        
+    finally:
+        funcs.C_Logout(session)
+        funcs.C_CloseSession(session)
+        funcs.C_Finalize(None)
+
+
 def generate_spkac(funcs, slot_id: int, pin: str, key_id: bytes, challenge: str) -> str:
     ''' 
     Generates an RSA Keypair on the token, extracts the raw public parameters, 

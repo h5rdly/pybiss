@@ -292,7 +292,7 @@ class Button(tk.Canvas):
 
 
     def _draw(self, event=None):
-        
+
         self.delete('all')
         w, h = self.winfo_width(), self.winfo_height()
         
@@ -462,3 +462,89 @@ class Toggle(tk.Frame):
     def set(self, state: bool):
         self.is_on = state
         self._draw()
+
+
+class Toplevel(tk.Toplevel):
+    ''' DPI-aware popup window that inherits scale from its master and prevents white-flash '''
+    
+    def __init__(self, master, title="Popup", width=400, height=300):
+        super().__init__(master)
+        self.withdraw() # Prevent white flash
+        
+        self.title(title)
+        self.configure(bg=Theme.BG)
+        set_dark_titlebar(self)
+        
+        # Inherit UI scale from the parent window
+        self.ui_scale = getattr(master, 'ui_scale', 1.0)
+        scaled_w = int(width * self.ui_scale)
+        scaled_h = int(height * self.ui_scale)
+        
+        self.update_idletasks()
+        x = (self.winfo_screenwidth() // 2) - (scaled_w // 2)
+        y = (self.winfo_screenheight() // 2) - (scaled_h // 2)
+        self.geometry(f'{scaled_w}x{scaled_h}+{x}+{y}')
+        
+        self.transient(master)
+        self.grab_set()
+        self.attributes('-topmost', True)
+
+
+    def show(self):
+        ''' Applies zoom and reveals the window flawlessly '''
+
+        if hasattr(self.master, '_apply_zoom'):
+            self.master._apply_zoom(self)
+        self.deiconify()
+
+
+class Textbox(Frame):
+    ''' Composite widget: Rounded Frame + tk.Text + Custom Scrollbar '''
+    
+    def __init__(self, master, width=400, height=200, corner_radius=10, **kwargs):
+        super().__init__(master, width=width, height=height, corner_radius=corner_radius)
+        
+        self.scrollbar = Scrollbar(self.inner, command=self._yview)
+        self.scrollbar.pack(side='right', fill='y', padx=(0, 2))
+        
+        text_kwargs = dict(bg=Theme.SURFACE, fg=Theme.TEXT, relief='flat', borderwidth=0, 
+                           font=('Consolas', 10), highlightthickness=0)
+        text_kwargs.update(kwargs)
+        
+        self.text = tk.Text(self.inner, yscrollcommand=self.scrollbar.set, **text_kwargs)
+        self.text.pack(side='left', fill='both', expand=True)
+
+    # Proxy methods to the native text widget
+    def _yview(self, *args): self.text.yview(*args)
+    def insert(self, *args, **kwargs): self.text.insert(*args, **kwargs)
+    def delete(self, *args, **kwargs): self.text.delete(*args, **kwargs)
+    def configure(self, *args, **kwargs): self.text.configure(*args, **kwargs)
+    def see(self, *args, **kwargs): self.text.see(*args, **kwargs)
+
+
+class Listbox(Frame):
+    ''' Composite widget: Rounded Frame + tk.Listbox + Custom Scrollbar '''
+    
+    def __init__(self, master, width=400, height=200, corner_radius=10, **kwargs):
+        super().__init__(master, width=width, height=height, corner_radius=corner_radius)
+        
+        self.scrollbar = Scrollbar(self.inner, command=self._yview)
+        self.scrollbar.pack(side='right', fill='y', padx=(0, 2))
+        
+        list_kwargs = dict(bg=Theme.SURFACE, fg=Theme.TEXT, selectbackground=Theme.PRIMARY, 
+                           selectforeground='white', relief='flat', borderwidth=0, 
+                           font=('Segoe UI', 10), highlightthickness=0)
+        list_kwargs.update(kwargs)
+        
+        self.listbox = tk.Listbox(self.inner, yscrollcommand=self.scrollbar.set, **list_kwargs)
+        self.listbox.pack(side='left', fill='both', expand=True)
+
+    # Proxy methods to the native listbox widget
+    def _yview(self, *args): self.listbox.yview(*args)
+    def insert(self, *args, **kwargs): self.listbox.insert(*args, **kwargs)
+    def curselection(self): return self.listbox.curselection()
+    def selection_set(self, *args): self.listbox.selection_set(*args)
+    def bind(self, *args, **kwargs): self.listbox.bind(*args, **kwargs)
+    def focus_set(self): self.listbox.focus_set()
+
+

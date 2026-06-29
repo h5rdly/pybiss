@@ -5,10 +5,12 @@ sys.path.append(__file__.rsplit('/', 1)[0])
 import src.detector as detector
 import src.hardware as hardware
 import src.service as service
-import src.server_ui as ui
 
 from src.config import config
 from src.server import MiniServer
+from src.ui_bridge import get_ui_provider
+
+from src.pkcs11_types import CKO_PRIVATE_KEY, CKO_PUBLIC_KEY, CKO_CERTIFICATE
 
 
 # -- Endpoints 
@@ -108,7 +110,7 @@ def write_cert_sc(req):
     if not cert_b64:
         return {'status': 'error', 'reasonCode': 400, 'reasonText': 'Missing certificate data'}
 
-    ui_provider = ui.get_ui_provider()
+    ui_provider = get_ui_provider()
     pin = ui_provider.prompt_pin()
     if not pin:
         return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
@@ -125,6 +127,124 @@ def write_cert_sc(req):
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
 
 
+@app.post('/getInfo')
+def get_info(req):
+    ''' Diagnostics: Returns full hardware spec sheet '''
+
+    lib_path = detector.auto_detect_library()
+    if not lib_path: return {'status': 'error', 'reasonCode': 400, 'reasonText': 'No smart card detected'}
+    
+    try:
+        funcs = hardware.load_pkcs11(lib_path)
+        slots = hardware.get_slots(funcs, token_present=True)
+        if not slots: return {'status': 'error', 'reasonCode': 404, 'reasonText': 'No token present'}
+        
+        info = hardware.get_token_info_extended(funcs, slots[0])
+        return {'info': info, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
+    except Exception as e:
+        return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
+
+
+@app.post('/genRSAPair')
+def gen_rsa_pair(req):
+
+    data = req.json
+    label = data.get('label', 'B-Trust Generated Key')
+    key_id = data.get('keyId', '').encode('utf-8')
+    
+    ui_provider = get_ui_provider()
+    pin = ui_provider.prompt_pin()
+    if not pin: return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
+
+    lib_path = detector.auto_detect_library()
+    try:
+        funcs = hardware.load_pkcs11(lib_path)
+        slots = hardware.get_slots(funcs, token_present=True)
+        
+        hardware.generate_rsa_keypair(funcs, slots[0], pin, label=label, key_id=key_id)
+        return {'status': 'ok', 'reasonCode': 200, 'reasonText': 'RSA Keypair Generated'}
+    except Exception as e:
+        return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
+
+
+@app.post('/renew')
+def renew_cert(req):
+    ''' Generates the SPKAC payload required for certificate renewal on B-Trust portals '''
+    
+    data = req.json
+    key_id = data.get('keyId', 'RENEWAL').encode('utf-8')
+    challenge = data.get('challenge', '1234')
+    
+    ui_provider = get_ui_provider()
+    pin = ui_provider.prompt_pin()
+    if not pin: return {'spkac': None, 'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
+
+    lib_path = detector.auto_detect_library()
+    try:
+        funcs = hardware.load_pkcs11(lib_path)
+        slots = hardware.get_slots(funcs, token_present=True)
+        
+        spkac_b64 = hardware.generate_spkac(funcs, slots[0], pin, key_id, challenge)
+        return {'spkac': spkac_b64, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
+    except Exception as e:
+        return {'spkac': None, 'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
+
+
+@app.post('/delRSAPair')
+def del_rsa_pair(req):
+
+    data = req.json
+    label = data.get('label')
+    if not label: 
+        return {'status': 'error', 'reasonCode': 400, 'reasonText': 'Missing key label'}
+
+    ui_provider = get_ui_provider()
+    pin = ui_provider.prompt_pin()
+    if not pin: 
+        return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
+
+    lib_path = detector.auto_detect_library()
+    try:
+        funcs = hardware.load_pkcs11(lib_path)
+        slots = hardware.get_slots(funcs, token_present=True)
+        
+        # Must attempt to delete both the Private and Public key objects
+        priv_deleted = hardware.delete_object_by_label(funcs, slots[0], pin, CKO_PRIVATE_KEY, label)
+        pub_deleted = hardware.delete_object_by_label(funcs, slots[0], pin, CKO_PUBLIC_KEY, label)
+        
+        if priv_deleted or pub_deleted:
+            return {'status': 'ok', 'reasonCode': 200, 'reasonText': 'Keypair deleted'}
+        else:
+            return {'status': 'error', 'reasonCode': 404, 'reasonText': 'Keypair not found'}
+    except Exception as e:
+        return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
+
+
+@app.post('/delCert')
+def del_cert(req):
+
+    data = req.json
+    label = data.get('label')
+    if not label: return {'status': 'error', 'reasonCode': 400, 'reasonText': 'Missing cert label'}
+
+    ui_provider = get_ui_provider()
+    pin = ui_provider.prompt_pin()
+    if not pin: return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
+
+    lib_path = detector.auto_detect_library()
+    try:
+        funcs = hardware.load_pkcs11(lib_path)
+        slots = hardware.get_slots(funcs, token_present=True)
+        
+        cert_deleted = hardware.delete_object_by_label(funcs, slots[0], pin, CKO_CERTIFICATE, label)
+        if cert_deleted:
+            return {'status': 'ok', 'reasonCode': 200, 'reasonText': 'Certificate deleted'}
+        else:
+            return {'status': 'error', 'reasonCode': 404, 'reasonText': 'Certificate not found'}
+    except Exception as e:
+        return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
+
+
 @app.post('/getsigner')
 def get_signer(req):
 
@@ -132,7 +252,7 @@ def get_signer(req):
     selector = data.get('selector')
     show_valid_certs = data.get('showValidCerts', True)
 
-    ui_provider = ui.get_ui_provider()
+    ui_provider = get_ui_provider()
     sign_api = config.get('signAPI', 'PKCS11')
     
     # - Windows Native Store (MSCAPI) Flow 
@@ -168,7 +288,7 @@ def get_signer(req):
     if not slots:
         raise Exception('No token present in smart card reader')
     
-    ui_provider = ui.get_ui_provider()
+    ui_provider = get_ui_provider()
     pin = ui_provider.prompt_pin()
     if not pin:
         return {'chain': [], 'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
@@ -240,7 +360,7 @@ def sign(req):
             return {'signatures': [], 'status': 'error', 'reasonCode': 403, 'reasonText': 'Server signature verification failed'}
 
     # Confirm signature request with the user via UI
-    ui_provider = ui.get_ui_provider()
+    ui_provider = get_ui_provider()
     confirm_msg = confirm_text[0] if confirm_text else 'Authorize signature request from banking portal?'
     
     confirmed = ui_provider.confirm_sign(confirm_msg)
@@ -357,4 +477,6 @@ def sign(req):
 
 if __name__ == '__main__':
 
+    # Runs the server headlessly via CLI
+    # For the full Desktop GUI, run src/dashboard.py instead
     app.run(host='127.0.0.1', port=4843)

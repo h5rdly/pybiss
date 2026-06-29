@@ -1,20 +1,21 @@
-import os, sys, tkinter as tk, base64
+import os, sys, tkinter as tk, base64, threading, queue
 from tkinter import filedialog
 
 sys.path.append(__file__.rsplit('/', 1)[0])
 
-
 from src.tkinter_mods import (
     Theme, Window, Button, Frame, Scrollbar, MessageBox, Toggle, Label, 
-    set_dark_titlebar
+    set_dark_titlebar, Toplevel, Textbox, Listbox, Entry
 )
-from src.locale import _
-from src.config import config
 
-# Import the core engine
+from src.config import config
+from src.locale import _
+from src.app import app as api_server
+
+# The core engine
 import src.detector as detector
 import src.hardware as hardware
-from src.server_ui import get_ui_provider
+from src.ui_bridge import ui_task_queue, set_gui_active
 
 
 class DesktopDashboard(Window):
@@ -23,6 +24,12 @@ class DesktopDashboard(Window):
 
         super().__init__(title="PyBISS Desktop Manager", width=750, height=550)
         
+        # Announce to the routing bridge that the GUI is alive and consuming the queue
+        set_gui_active(True)
+
+        # Initialize the renderer with this main window as the master
+        self.ui_renderer = ModalRenderer(self)
+
         self._build_sidebar()
         self._build_main_container()
         
@@ -35,9 +42,31 @@ class DesktopDashboard(Window):
 
         # Start on Home
         self.show_view('home')
-        
         # Start the background log-tailing loop
         self._auto_tail_logs()
+        # Start checking the queue
+        self._monitor_ui_queue()
+
+
+    def _monitor_ui_queue(self):
+
+        try:
+            task_type, kwargs, result_queue = ui_task_queue.get_nowait()
+            
+            if task_type == 'prompt_pin':
+                res = self.ui_renderer.prompt_pin(**kwargs)
+                result_queue.put(res)
+            elif task_type == 'choose_certificate':
+                res = self.ui_renderer.choose_certificate(**kwargs)
+                result_queue.put(res)
+            elif task_type == 'confirm_sign':
+                res = self.ui_renderer.confirm_sign(**kwargs)
+                result_queue.put(res)
+        except queue.Empty:
+            pass
+            
+        self.after(100, self._monitor_ui_queue)
+
 
     # --- Layout Architecture ---
 
@@ -55,8 +84,8 @@ class DesktopDashboard(Window):
         # Navigation Buttons
         self.nav_btns = {}
         nav_items = [
-            ('home', f'🏠  {_('dash_title').split()[0]}'), # Grabs just the first word for compactness
-            ('logs', f'📄  {_('tray_log_file')}'), 
+            ('home', f'🏠  {_("dash_title").split()[0]}'), # Grabs just the first word for compactness
+            ('logs', f'📄  {_("tray_log_file")}'), 
             ('admin', '🛠️  Administration'),
             ('settings', '⚙️  Settings') # Hardcoded for now, or add to locale.py
         ]
@@ -114,17 +143,9 @@ class DesktopDashboard(Window):
         Button(btn_frame, _('btn_scan'), self.scan_card, width=160).pack(side='left', padx=(0, 15))
         Button(btn_frame, _('btn_read_certs'), self.read_certs, width=160, fg_color=Theme.SURFACE).pack(side='left')
 
-        # Output Area
-        container = Frame(frame, width=500, height=280)
-        container.pack(pady=25, padx=35, fill='both', expand=True)
-
-        scrollbar = Scrollbar(container.inner, command=lambda *args: self.output_text.yview(*args))
-        scrollbar.pack(side='right', fill='y', padx=(0, 2))
-        
-        self.output_text = tk.Text(container.inner, yscrollcommand=scrollbar.set, bg=Theme.SURFACE, 
-                                   fg=Theme.TEXT, relief='flat', borderwidth=0, font=('Consolas', 10), 
-                                   highlightthickness=0)
-        self.output_text.pack(side='left', fill='both', expand=True)
+        # Output Area (Refactored using the new Composite Textbox)
+        self.output_text = Textbox(frame, width=500, height=280, font=('Consolas', 10))
+        self.output_text.pack(pady=25, padx=35, fill='both', expand=True)
 
 
     def _build_logs_view(self):
@@ -139,15 +160,9 @@ class DesktopDashboard(Window):
         # Manual refresh button, just in case
         Button(header, 'Refresh', self.refresh_logs, width=90, fg_color=Theme.SURFACE).pack(side='right')
 
-        container = Frame(frame, width=500, height=380)
-        container.pack(pady=10, padx=35, fill='both', expand=True)
-
-        scrollbar = Scrollbar(container.inner, command=lambda *args: self.log_text.yview(*args))
-        scrollbar.pack(side='right', fill='y', padx=(0, 2))
-
-        self.log_text = tk.Text(container.inner, yscrollcommand=scrollbar.set, bg='#1E1E1E', 
-                                fg='#A9B7C6', relief='flat', borderwidth=0, font=('Consolas', 9), highlightthickness=0)
-        self.log_text.pack(side='left', fill='both', expand=True)
+        # Refactored using the new Composite Textbox
+        self.log_text = Textbox(frame, width=500, height=380, bg='#1E1E1E', fg='#A9B7C6', font=('Consolas', 9))
+        self.log_text.pack(pady=10, padx=35, fill='both', expand=True)
         self.log_text.configure(state='disabled')
         
         # Initial log load
@@ -177,6 +192,7 @@ class DesktopDashboard(Window):
         cert_frame.pack(anchor='w', padx=35)
         
         Button(cert_frame, 'Import Certificate', self._ui_import_cert, width=160, fg_color=Theme.SURFACE).pack(side='left')
+
 
     def _ui_change_pin(self):
         
@@ -214,6 +230,7 @@ class DesktopDashboard(Window):
         except Exception as e:
             MessageBox.showinfo("Error", f"Failed to unblock card: {e}")
             
+
     def _ui_import_cert(self):
         
         # Native OS File Dialog
@@ -292,6 +309,7 @@ class DesktopDashboard(Window):
         Button(frame, _("tray_default"), self.factory_reset, fg_color=Theme.DANGER, 
                      hover_color=Theme.DANGER_HOVER, width=160).pack(anchor="w", padx=35, pady=(30, 0))
 
+
     # --- UI Logic & State ---
 
     def set_lang(self, lang, save=True):
@@ -306,6 +324,7 @@ class DesktopDashboard(Window):
 
 
     def set_api(self, api, save=True):
+
         if save: 
             config.set('signAPI', api)
         self.btn_p11.fg_color = Theme.PRIMARY if api == 'PKCS11' else Theme.SURFACE
@@ -315,6 +334,7 @@ class DesktopDashboard(Window):
 
 
     def factory_reset(self):
+        
         if MessageBox.askyesno('Factory Reset', 'Are you sure you want to restore default settings?'):
             config.set('language', 'en')
             config.set('signAPI', 'PKCS11')
@@ -325,7 +345,6 @@ class DesktopDashboard(Window):
 
 
     def save_boot_setting(self, is_on: bool):
-
         config.set("osStarted", str(is_on))
         self.log_to_dashboard(f"[*] Run on startup set to: {is_on}")
 
@@ -354,6 +373,7 @@ class DesktopDashboard(Window):
 
     def refresh_logs(self):
         ''' Fully reloads the log file, showing only the last 500 lines to prevent UI lag '''
+        
         self.log_text.configure(state='normal')
         self.log_text.delete('1.0', 'end')
         
@@ -371,10 +391,13 @@ class DesktopDashboard(Window):
         self.log_text.see('end')
         self.log_text.configure(state='disabled')
 
+
     def log_to_dashboard(self, message: str):
         ''' Writes a message exclusively to the dashboard's Home tab text area '''
+
         self.output_text.insert('end', message + '\n')
         self.output_text.see('end')
+
 
     # --- Core Engine Integrations (Home Tab) ---
 
@@ -394,7 +417,7 @@ class DesktopDashboard(Window):
             self.log_to_dashboard(f'    - {r}')
             
         try:
-            # We must load the library first!
+            # Load the library first
             lib_path = config.get('pkcs11Path') or hardware.LIBCVP11_PATH
             funcs = hardware.load_pkcs11(lib_path)
             
@@ -412,8 +435,7 @@ class DesktopDashboard(Window):
         self.log_to_dashboard('[*] Attempting to read certificates from card...')
         self.update_idletasks()
         
-        # We need a PIN to read private certificate objects. 
-        # Since we are the Desktop UI, we can use the Server UI's modal to ask for it!
+        # Use the Server UI's modal to ask for a a PIN to read private certificate objects
         pin_modal = get_ui_provider()
         pin = pin_modal.prompt_pin()
         if not pin:
@@ -432,13 +454,173 @@ class DesktopDashboard(Window):
             self.log_to_dashboard(f'[+] Successfully loaded {len(certs)} certificate(s):\n')
             for idx, cert in enumerate(certs):
                 self.log_to_dashboard(f'--- Certificate {idx} ---')
-                self.log_to_dashboard(f'ID:     {cert.get('id', b'').hex()}')
-                self.log_to_dashboard(f'Length: {len(cert.get('der', b''))} bytes')
+                self.log_to_dashboard(f'ID:     {cert.get("id", b"").hex()}')
+                self.log_to_dashboard(f'Length: {len(cert.get("der", b""))} bytes')
                 self.log_to_dashboard('-' * 30 + '\n')
                 
         except Exception as e:
             self.log_to_dashboard(f'[-] Failed to read certificates: {e}')
 
+
+class ThreadSafeUIProxy:
+    ''' 
+    Used by the background server. Instead of creating windows, 
+    it drops a task into the queue and waits for the Main Thread to reply.
+    '''
+
+    def prompt_pin(self, attempt: int = 1) -> str:
+        res_q = queue.Queue()
+        ui_task_queue.put(('prompt_pin', {'attempt': attempt}, res_q))
+        return res_q.get()
+
+    def choose_certificate(self, certs: list[dict]) -> int:
+        res_q = queue.Queue()
+        ui_task_queue.put(('choose_certificate', {'certs': certs}, res_q))
+        return res_q.get()
+
+    def confirm_sign(self, text: str, additional_text: str = None) -> bool:
+        res_q = queue.Queue()
+        ui_task_queue.put(('confirm_sign', {'text': text, 'additional_text': additional_text}, res_q))
+        return res_q.get()
+
+
+class ModalRenderer:
+    ''' Draws popups attached to the existing Main Window using tkinter_mods Composite Widgets '''
+
+    def __init__(self, master_window):
+        self.master = master_window
+
+    def prompt_pin(self, attempt: int = 1) -> str:
+
+        dialog = Toplevel(self.master, title='Security Verification', width=350, height=220)
+        result = {'pin': None}
+        
+        msg = 'Enter Smart Card PIN:' if attempt == 1 else f'Incorrect PIN. Try again (Attempt {attempt}):'
+        color = Theme.TEXT if attempt == 1 else Theme.DANGER
+        
+        Label(dialog, text=msg, fg=color).pack(pady=(25, 10))
+        
+        entry = Entry(dialog, width=220, height=38, show='*')
+        entry.pack(pady=10)
+        
+        def on_ok(event=None):
+            result['pin'] = entry.get()
+            dialog.destroy()
+            
+        def on_cancel(event=None):
+            dialog.destroy()
+            
+        btn_frame = tk.Frame(dialog, bg=Theme.BG)
+        btn_frame.pack(pady=20)
+        
+        Button(btn_frame, 'Unlock', on_ok, width=100).pack(side='left', padx=10)
+        Button(btn_frame, 'Cancel', on_cancel, width=100, fg_color=Theme.BG, hover_color=Theme.BORDER).pack(side='right', padx=10)
+        
+        dialog.bind('<Return>', on_ok)
+        dialog.bind('<Escape>', lambda e: on_cancel())
+        dialog.protocol('WM_DELETE_WINDOW', on_cancel)
+        
+        dialog.show()
+        dialog.after(100, entry.focus)
+        
+        dialog.wait_window()
+        return result['pin']
+
+
+    def choose_certificate(self, certs: list[dict]) -> int:
+
+        dialog = Toplevel(self.master, title='Select Certificate', width=450, height=360)
+        result = {'index': -1}
+        
+        Label(dialog, text='Select the certificate to sign with:').pack(pady=(20, 10))
+        
+        # Instantiating the new composite Listbox handles the scrolling and formatting seamlessly
+        listbox = Listbox(dialog, width=410, height=200)
+        listbox.pack(pady=10, padx=20, fill='both', expand=True)
+        
+        for cert in certs:
+            listbox.insert('end', f" {cert.get('subject', 'Unknown')} (Serial: {cert.get('serial', '')})")
+            
+        if certs: listbox.selection_set(0)
+            
+        def on_ok(event=None):
+            sel = listbox.curselection()
+            if sel: result['index'] = sel[0]
+            dialog.destroy()
+            
+        def on_cancel(event=None):
+            dialog.destroy()
+            
+        btn_frame = tk.Frame(dialog, bg=Theme.BG)
+        btn_frame.pack(pady=15)
+        
+        Button(btn_frame, 'Select', on_ok, width=120).pack(side='left', padx=10)
+        Button(btn_frame, 'Cancel', on_cancel, width=120, fg_color=Theme.BG, hover_color=Theme.BORDER).pack(side='right', padx=10)
+        
+        listbox.bind('<Double-1>', on_ok)
+        dialog.bind('<Return>', on_ok)
+        dialog.bind('<Escape>', lambda e: on_cancel())
+        dialog.protocol('WM_DELETE_WINDOW', on_cancel)
+        
+        dialog.show()
+        dialog.after(100, listbox.focus_set)
+        
+        dialog.wait_window()
+        return result['index']
+
+
+    def confirm_sign(self, text: str, additional_text: str = None) -> bool:
+
+        dialog = Toplevel(self.master, title='Authorize Signature', width=500, height=420)
+        result = {'confirmed': False}
+        
+        Label(dialog, text='Do you authorize this signature?', font=('Segoe UI', 14, 'bold')).pack(pady=(20, 10))
+        
+        # Instantiating the new composite Textbox handles the scrolling and formatting seamlessly
+        textbox = Textbox(dialog, width=460, height=240, font=('Segoe UI', 11), wrap='word')
+        textbox.pack(pady=10, padx=20, fill='both', expand=True)
+        
+        full_text = f'Message:\n{text}'
+        if additional_text: full_text += f'\n\nAdditional Info:\n{additional_text}'
+            
+        textbox.insert('1.0', full_text)
+        textbox.configure(state='disabled')
+        
+        def on_yes():
+            result['confirmed'] = True
+            dialog.destroy()
+            
+        def on_no():
+            dialog.destroy()
+            
+        btn_frame = tk.Frame(dialog, bg=Theme.BG)
+        btn_frame.pack(pady=15)
+        
+        # Grab focus to the "Authorize" button by default
+        btn_yes = Button(btn_frame, 'Authorize', on_yes, bg_color='#2FA572', hover_color='#106A43', width=130)
+        btn_yes.pack(side='left', padx=10)
+        Button(btn_frame, 'Reject', on_no, bg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, width=130).pack(side='right', padx=10)
+        
+        # Pressing Enter hits 'Authorize'
+        dialog.bind('<Return>', lambda e: on_yes())
+        dialog.bind('<Escape>', lambda e: on_no())
+        dialog.protocol('WM_DELETE_WINDOW', on_no)
+        
+        dialog.show()
+        dialog.wait_window()
+
+        return result['confirmed']
+
+
 if __name__ == '__main__':
+
+    # Start the REST API in a background daemon thread
+    server_thread = threading.Thread(
+        target=lambda: api_server.run(host='127.0.0.1', port=4843), 
+        daemon=True
+    )
+    server_thread.start()
+
+    # Start the native Desktop UI on the main thread (Blocks until closed)
     app = DesktopDashboard()
     app.mainloop()
