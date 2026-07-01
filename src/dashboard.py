@@ -1,21 +1,21 @@
-import os, sys, tkinter as tk, base64, threading, queue
+import os, sys, logging, tkinter as tk, base64, threading, queue
 from tkinter import filedialog
 
 sys.path.append(__file__.rsplit('/', 1)[0])
 
-from src.tkinter_mods import (
+from tkinter_mods import (
     Theme, Window, Button, Frame, Scrollbar, MessageBox, Toggle, Label, 
     set_dark_titlebar, Toplevel, Textbox, Listbox, Entry
 )
 
-from src.config import config
-from src.locale import _
-from src.app import app as api_server
+from config import config
+from locale import _
+from app import app as api_server
 
 # The core engine
-import src.detector as detector
-import src.hardware as hardware
-from src.ui_bridge import ui_task_queue, set_gui_active
+import detector as detector
+import hardware as hardware
+from ui_bridge import ui_task_queue, set_gui_active
 
 
 class DesktopDashboard(Window):
@@ -24,6 +24,19 @@ class DesktopDashboard(Window):
 
         super().__init__(title="PyBISS Desktop Manager", width=750, height=550)
         
+        # Logging
+        self._log_file = config.config_dir / 'pybiss.log'
+        self._log_file.touch(exist_ok=True) # Ensure the file exists so we don't crash
+        self._last_log_size = 0
+        logging.basicConfig(
+            filename=str(self._log_file),
+            level=logging.INFO,
+            format='[%(asctime)s] %(levelname)s - %(message)s',
+            datefmt='%Y-%m-%d %H:%M:%S'
+        )
+        
+        logging.info("PyBISS Desktop Manager starting...")
+
         # Announce to the routing bridge that the GUI is alive and consuming the queue
         set_gui_active(True)
 

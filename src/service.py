@@ -2,8 +2,8 @@ import sys, time, hashlib
 
 sys.path.append(__file__.rsplit('/', 1)[0])
 
-from src.cert_parser import get_x509_metadata, get_x509_subject, get_rsa_public_key
-from src.verifier import verify_rsa_pkcs1_v1_5
+from cert_parser import get_x509_metadata, get_x509_subject, get_rsa_public_key
+from verifier import verify_rsa_pkcs1_v1_5
 
 
 def _match_selector(metadata: dict, selector: dict) -> bool:

@@ -2,7 +2,7 @@ import sys
 
 sys.path.append(__file__.rsplit('/', 1)[0])
 
-from src.config import config
+from config import config
 
 
 # Centralized translation dictionaries

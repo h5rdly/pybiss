@@ -89,6 +89,7 @@ class Window(tk.Tk):
 
         # Zooming/Scaling 
         self.zoom_level = 12 # Default baseline font size
+        self._zoom_timer = None # Debounce timer
         
         # Windows/Linux bindings
         self.bind('<Control-MouseWheel>', self._on_mousewheel_zoom)
@@ -114,16 +115,35 @@ class Window(tk.Tk):
         else:
             self._zoom_out()
 
-
     def _zoom_in(self, event=None):
         if self.zoom_level < 24: # Max font size
             self.zoom_level += 1
-            self._apply_zoom(self)
+            self._schedule_zoom()
 
     def _zoom_out(self, event=None):
         if self.zoom_level > 8: # Min font size
             self.zoom_level -= 1
-            self._apply_zoom(self)
+            self._schedule_zoom()
+
+
+    def _schedule_zoom(self):
+        ''' 
+        Debounce: Cancel any pending redraws and schedule a new one
+        Ensures the heavy _apply_zoom only runs AFTER the user stops scrolling
+        '''
+
+        if self._zoom_timer is not None:
+            self.after_cancel(self._zoom_timer)
+            
+        # Wait 50ms after the last scroll tick to actually redraw
+        self._zoom_timer = self.after(50, self._perform_zoom)
+
+
+    def _perform_zoom(self):
+        ''' Trigger recursive redraw '''
+
+        self._zoom_timer = None
+        self._apply_zoom(self)
 
 
     @property

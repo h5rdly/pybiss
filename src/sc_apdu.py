@@ -83,3 +83,41 @@ def read_binary_file(card_connection, file_id: bytes) -> bytes:
             raise Exception(f'Failed to read binary at offset {offset}: {status_word.hex()}')
             
     return bytes(cert_data)
+
+
+def build_apdu(cla: int, ins: int, p1: int, p2: int, data: bytes = b'', le: int = None) -> bytes:
+    '''
+    Safely builds an ISO-7816 APDU.
+    Automatically handles Short vs Extended APDU limits.
+    '''
+
+    header = bytes([cla, ins, p1, p2])
+    lc_val = len(data)
+    
+    # A Short APDU can handle up to 255 bytes of data and up to 256 bytes of expected response
+    if lc_val <= 255 and (le is None or le <= 256):
+        # --- Short APDU ---
+        apdu = header
+        if lc_val > 0:
+            apdu += bytes([lc_val]) + data
+        if le is not None:
+            # Le=256 is encoded as 0x00 in a Short APDU
+            apdu += bytes([le % 256])
+        return apdu
+    else:
+        # --- Extended APDU ---
+        apdu = header
+        if lc_val > 0:
+            # Lc is 3 bytes: 00 HighByte LowByte
+            apdu += b'\x00' + lc_val.to_bytes(2, 'big') + data
+            
+        if le is not None:
+            # Le=65536 is encoded as 0x0000 in Extended APDU
+            le_encoded = le % 65536 
+            if lc_val > 0:
+                # If Lc was present, Le is 2 bytes at the tail
+                apdu += le_encoded.to_bytes(2, 'big')
+            else:
+                # If no Lc, Le is 3 bytes: 00 HighByte LowByte
+                apdu += b'\x00' + le_encoded.to_bytes(2, 'big')
+        return apdu

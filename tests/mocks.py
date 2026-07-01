@@ -399,3 +399,28 @@ class FakeMSCAPI:
 class DummyWindowsLibrary:
     ''' Simple object to hold function attributes for Windows DLL mocking '''
     pass
+
+
+class FakeSmartCardConnection:
+    ''' A stateful fake representing a raw PC/SC smart card connection '''
+
+    def __init__(self):
+        self.transmit_call_count = 0
+        self.last_transmitted_apdu = None
+        
+        # Test configurables
+        self.atr_bytes = b''
+        self.transmit_responses = []
+
+    def get_atr(self) -> bytes:
+        return self.atr_bytes
+
+    def transmit(self, apdu_bytes: bytes) -> bytes:
+        self.transmit_call_count += 1
+        self.last_transmitted_apdu = apdu_bytes
+        
+        if self.transmit_responses:
+            # Pop the next programmed response in the sequence
+            return self.transmit_responses.pop(0)
+            
+        return b'\x90\x00' # Default to ISO 7816 Success

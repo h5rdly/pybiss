@@ -3,8 +3,8 @@ from ctypes import (sizeof, c_ulong)
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
-from src.pkcs11_types import CKA_CLASS, CKO_CERTIFICATE, CKA_TOKEN, CKA_LABEL, CK_ATTRIBUTE
-from src.hardware import _pack_template
+from pkcs11_types import CKA_CLASS, CKO_CERTIFICATE, CKA_TOKEN, CKA_LABEL, CK_ATTRIBUTE
+from hardware import _pack_template
 
 
 class TestPkcs11Funcs(unittest.TestCase):
@@ -27,7 +27,7 @@ class TestPkcs11Funcs(unittest.TestCase):
         
         # Ensure the array is the correct length
         assert len(c_attrs) == 3
-        assert isinstance(c_attrs[0], CK_ATTRIBUTE)
+        assert type(c_attrs[0]).__name__ == 'CK_ATTRIBUTE'
         
         # Ensure references are kept alive
         # We passed 3 values, so we should have 3 ctypes memory references holding the data

@@ -99,7 +99,13 @@ class SCARD_READERSTATE(Structure):
         ('rgbAtr', BYTE * MAX_ATR_SIZE)
     ]
 
-# --- Load the OS-specific library ---
+
+# --- Load the OS-specific library (Import-Safe) ---
+
+SCardEstablishContext_fn = None
+g_rgSCardT0Pci = None
+g_rgSCardT1Pci = None
+
 if sys.platform == 'win32':
     # Windows uses __stdcall calling convention
     scard_lib = WinDLL('winscard.dll')
@@ -115,8 +121,22 @@ if sys.platform == 'win32':
     SCardEndTransaction_fn   = scard_lib.SCardEndTransaction
     SCardStatus_fn           = scard_lib.SCardStatusA
 
-elif sys.platform.startswith('linux'):
-    # Linux uses standard C calling convention
+elif sys.platform == 'darwin':
+    # macOS uses the native PCSC Framework
+    scard_lib = CDLL('/System/Library/Frameworks/PCSC.framework/PCSC')
+    
+    SCardEstablishContext_fn = scard_lib.SCardEstablishContext
+    SCardListReaders_fn      = scard_lib.SCardListReaders
+    SCardConnect_fn          = scard_lib.SCardConnect
+    SCardTransmit_fn         = scard_lib.SCardTransmit
+    SCardDisconnect_fn       = scard_lib.SCardDisconnect
+    SCardReleaseContext_fn   = scard_lib.SCardReleaseContext
+    SCardBeginTransaction_fn = scard_lib.SCardBeginTransaction
+    SCardEndTransaction_fn   = scard_lib.SCardEndTransaction
+    SCardStatus_fn           = scard_lib.SCardStatus
+
+elif sys.platform.startswith('linux') or sys.platform.startswith('freebsd'):
+    # Linux, Alpine, and FreeBSD use the standard open-source pcsclite daemon
     try:
         scard_lib = CDLL('libpcsclite.so.1')
     except OSError:
@@ -131,8 +151,10 @@ elif sys.platform.startswith('linux'):
     SCardBeginTransaction_fn = scard_lib.SCardBeginTransaction
     SCardEndTransaction_fn   = scard_lib.SCardEndTransaction
     SCardStatus_fn           = scard_lib.SCardStatus
+    
 else:
     raise NotImplementedError(f'Platform {sys.platform} not supported')
+
 
 # --- Define Argument and Return Types ---
 SCardEstablishContext_fn.argtypes = [DWORD, c_void_p, c_void_p, LPSCARDCONTEXT]

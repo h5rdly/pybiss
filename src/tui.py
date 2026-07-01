@@ -9,9 +9,9 @@ else:
 
 sys.path.append(__file__.rsplit('/', 1)[0])
 
-from src.detector import auto_detect_library
-from src.hardware import load_pkcs11, get_slots, get_certificates, sign_payload
-from src.cert_parser import get_x509_subject
+from detector import auto_detect_library
+from hardware import load_pkcs11, get_slots, get_certificates, sign_payload
+from cert_parser import get_x509_subject
 
 
 

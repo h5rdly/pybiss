@@ -2,15 +2,15 @@ import base64, sys
 
 sys.path.append(__file__.rsplit('/', 1)[0])
 
-import src.detector as detector
-import src.hardware as hardware
-import src.service as service
+import detector as detector
+import hardware as hardware
+import service as service
 
-from src.config import config
-from src.server import MiniServer
-from src.ui_bridge import get_ui_provider
+from config import config
+from server import MiniServer
+from ui_bridge import get_ui_provider
 
-from src.pkcs11_types import CKO_PRIVATE_KEY, CKO_PUBLIC_KEY, CKO_CERTIFICATE
+from pkcs11_types import CKO_PRIVATE_KEY, CKO_PUBLIC_KEY, CKO_CERTIFICATE
 
 
 # -- Endpoints 
@@ -257,7 +257,7 @@ def get_signer(req):
     
     # - Windows Native Store (MSCAPI) Flow 
     if sign_api == 'MSCAPI' and sys.platform == 'win32':
-        import src.mscapi as mscapi
+        import mscapi as mscapi
         raw_certs = mscapi.get_windows_certificates()
         try:
             filtered_certs = service.filter_certificates(
@@ -376,12 +376,12 @@ def sign(req):
          return {'signatures': [], 'status': 'error', 'reasonCode': 400, 'reasonText': 'Invalid signer certificate encoding'}
 
     # Route to the correct Cryptographic Engine
-    from src.config import config
+    from config import config
     sign_api = config.get('signAPI', 'PKCS11')
 
     # PATH A: Windows Native Store (MSCAPI / CNG)
     if sign_api == 'MSCAPI' and sys.platform == 'win32':
-        import src.mscapi as mscapi
+        import mscapi as mscapi
         raw_certs = mscapi.get_windows_certificates()
         try:
             target_ctx = None
