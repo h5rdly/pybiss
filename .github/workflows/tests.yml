@@ -27,6 +27,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: ${{ endsWith(matrix.python-version, 't') }}
 
+      - name: Install PC/SC drivers on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite1
+        
       - name: Run tests
         run: python -m unittest discover tests
 
@@ -38,6 +42,10 @@ jobs:
       image: python:3.14-alpine
     steps:
       - uses: actions/checkout@v6
+
+      - name: Install Alpine PC/SC dependencies
+        run: apk add --no-cache pcsc-lite-libs
+        
       - name: Run tests
         run: python -m unittest discover tests
 
