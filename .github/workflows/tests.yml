@@ -27,6 +27,10 @@ jobs:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: ${{ endsWith(matrix.python-version, 't') }}
 
+      - name: Install PC/SC drivers on Linux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite1
+        
       - name: Run tests
         run: python -m unittest discover tests
 
