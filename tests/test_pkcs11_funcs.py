@@ -3,8 +3,8 @@ from ctypes import (sizeof, c_ulong)
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
-from pkcs11_types import CKA_CLASS, CKO_CERTIFICATE, CKA_TOKEN, CKA_LABEL, CK_ATTRIBUTE
-from hardware import _pack_template
+from src.pkcs11_types import CKA_CLASS, CKO_CERTIFICATE, CKA_TOKEN, CKA_LABEL, CK_ATTRIBUTE
+from src.hardware import _pack_template
 
 
 class TestPkcs11Funcs(unittest.TestCase):

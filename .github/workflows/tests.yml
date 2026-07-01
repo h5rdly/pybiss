@@ -60,6 +60,6 @@ jobs:
         with:
           release: "14.4"
           usesh: true
-          prepare: pkg install -y python314
+          prepare: pkg install -y python314 pcsc-lite
           run: |
             python3.14 -m unittest discover tests
