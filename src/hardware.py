@@ -3,7 +3,7 @@ from ctypes import (
     pointer, byref, sizeof, cast, CDLL, POINTER, c_ubyte, c_ulong, c_void_p, c_char_p
 )
 
-sys.path.append(__file__.rsplit('/', 1)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
 from pkcs11_funcs import CK_FUNCTION_LIST
 from pkcs11_types import (

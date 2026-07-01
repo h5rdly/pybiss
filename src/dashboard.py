@@ -1,7 +1,7 @@
 import os, sys, logging, tkinter as tk, base64, threading, queue
 from tkinter import filedialog
 
-sys.path.append(__file__.rsplit('/', 1)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
 from tkinter_mods import (
     Theme, Window, Button, Frame, Scrollbar, MessageBox, Toggle, Label, 

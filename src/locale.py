@@ -1,6 +1,6 @@
 import sys
 
-sys.path.append(__file__.rsplit('/', 1)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
 from config import config
 

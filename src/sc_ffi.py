@@ -2,7 +2,7 @@ import sys
 from ctypes import byref, c_ubyte, create_string_buffer
 from contextlib import contextmanager
 
-sys.path.append(__file__.rsplit('/', 1)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
 from src.sc_types import * 
 

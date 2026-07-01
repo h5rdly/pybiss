@@ -7,7 +7,7 @@ else:
     import tty
     import select
 
-sys.path.append(__file__.rsplit('/', 1)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
 from detector import auto_detect_library
 from hardware import load_pkcs11, get_slots, get_certificates, sign_payload

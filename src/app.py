@@ -1,6 +1,6 @@
 import base64, sys
 
-sys.path.append(__file__.rsplit('/', 1)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
 import detector as detector
 import hardware as hardware

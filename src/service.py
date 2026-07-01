@@ -1,6 +1,6 @@
 import sys, time, hashlib
 
-sys.path.append(__file__.rsplit('/', 1)[0])
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
 from cert_parser import get_x509_metadata, get_x509_subject, get_rsa_public_key
 from verifier import verify_rsa_pkcs1_v1_5
