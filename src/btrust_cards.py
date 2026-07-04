@@ -38,26 +38,6 @@ SCHSM_ATRS = [
 ]
 
 
-class BTrustDriver:
-    ''' Factory class to instantiate the correct hardware driver '''
-
-    @staticmethod
-    def create(connection: SmartCardConnection) -> BaseCardDriver:
-        atr = connection.get_atr().hex().upper()
-        
-        if any(a in atr for a in IDPRIME_ATRS):
-            return IDPrimeDriver(connection)
-        elif any(a in atr for a in CARDOS_ATRS):
-            return CardOSDriver(connection)
-        elif any(a in atr for a in ASEPCOS_ATRS):
-            return AsepcosDriver(connection)
-        elif any(a in atr for a in IASECC_ATRS):
-            return IasEccDriver(connection)
-        elif any(a in atr for a in SCHSM_ATRS):
-            return ScHsmDriver(connection)
-        else:
-            raise Exception(f'Unsupported Smart Card ATR: {atr}')
-
 
 class BaseCardDriver:
     ''' Abstract base class for B-Trust smart cards '''
@@ -141,6 +121,27 @@ class BaseCardDriver:
         raise NotImplementedError
 
 
+
+class BTrustDriver:
+    ''' Factory class to instantiate the correct hardware driver '''
+
+    @staticmethod
+    def create(connection: SmartCardConnection) -> BaseCardDriver:
+        atr = connection.get_atr().hex().upper()
+        
+        if any(a in atr for a in IDPRIME_ATRS):
+            return IDPrimeDriver(connection)
+        elif any(a in atr for a in CARDOS_ATRS):
+            return CardOSDriver(connection)
+        elif any(a in atr for a in ASEPCOS_ATRS):
+            return AsepcosDriver(connection)
+        elif any(a in atr for a in IASECC_ATRS):
+            return IasEccDriver(connection)
+        elif any(a in atr for a in SCHSM_ATRS):
+            return ScHsmDriver(connection)
+        else:
+            raise Exception(f'Unsupported Smart Card ATR: {atr}')
+            
 
 class IDPrimeDriver(BaseCardDriver):
     ''' Gemalto IDPrime Implementation '''
