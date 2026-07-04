@@ -2,7 +2,7 @@ import sys, unittest
 
 sys.path.append(f'{__file__.replace('\\', '/').rsplit('/', 2)[0]}')
 
-from src.sc_apdu import pad_pkcs1_v15_sha256, read_binary_file, build_apdu
+from src.sc_apdu import pad_pkcs1_v15_sha256, read_binary_file, build_apdu, decode_ecdsa_signature
 from mocks import FakeSmartCardConnection
 
 
@@ -88,6 +88,30 @@ class TestSCAPDU(unittest.TestCase):
         
         # Expect: Lc is 00 01 00, Data, Le is 00 00 (0 means expect up to 65536 bytes back)
         assert apdu == b'\x00\x2A\x9E\x9A\x00\x01\x00' + data + b'\x01\x00'
+
+
+    def test_decode_ecdsa_signature(self):
+        
+        # A mocked ASN.1 ECDSA signature where 'r' has a leading 0x00 padding byte
+        # and 's' is slightly too short and needs padding to reach 32 bytes.
+        r_val = b'\x00' + (b'\xAA' * 32)
+        s_val = b'\xBB' * 31
+        
+        seq_content = (
+            b'\x02' + bytes([len(r_val)]) + r_val +
+            b'\x02' + bytes([len(s_val)]) + s_val
+        )
+        asn1_sig = b'\x30' + bytes([len(seq_content)]) + seq_content
+        
+        raw_sig = decode_ecdsa_signature(asn1_sig, curve_bytes=32)
+        
+        # Output must be exactly 64 bytes
+        assert len(raw_sig) == 64
+        # 'r' must have its 0x00 stripped
+        assert raw_sig[:32] == b'\xAA' * 32
+        # 's' must be front-padded with 0x00
+        assert raw_sig[32:] == b'\x00' + (b'\xBB' * 31)
+
 
 
 if __name__ == '__main__':

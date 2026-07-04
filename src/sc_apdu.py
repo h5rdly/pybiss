@@ -1,3 +1,8 @@
+import sys
+
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
+
+from cert_parser import DerReader
 
 
 def pad_pkcs1_v15_sha256(hash_bytes: bytes, key_size_bits: int = 2048) -> bytes:
@@ -121,3 +126,36 @@ def build_apdu(cla: int, ins: int, p1: int, p2: int, data: bytes = b'', le: int 
                 # If no Lc, Le is 3 bytes: 00 HighByte LowByte
                 apdu += b'\x00' + le_encoded.to_bytes(2, 'big')
         return apdu
+
+
+def decode_ecdsa_signature(asn1_sig: bytes, curve_bytes: int = 32) -> bytes:
+    '''
+    Unwraps an ISO-7816 ASN.1 ECDSA signature (SEQUENCE { r INTEGER, s INTEGER })
+    into the raw concatenated r||s format (64 bytes for P-256) expected by standard crypto APIs.
+    '''
+
+    reader = DerReader(asn1_sig)
+    try:
+        tag, val = reader.read_tlv()
+        if tag != 0x30:
+            return asn1_sig # Failsafe: Card already returned raw bytes
+            
+        seq = DerReader(val)
+        _, r_bytes = seq.read_tlv()
+        _, s_bytes = seq.read_tlv()
+        
+        # ASN.1 integers are signed. If the highest bit is 1, a leading 0x00 is added.
+        # We must strip this padding to get the true mathematical integer bytes.
+        if len(r_bytes) > curve_bytes and r_bytes[0] == 0x00: r_bytes = r_bytes[1:]
+        if len(s_bytes) > curve_bytes and s_bytes[0] == 0x00: s_bytes = s_bytes[1:]
+        
+        # If the integer is smaller than the curve size, pad it with leading zeros
+        r_bytes = r_bytes.rjust(curve_bytes, b'\x00')
+        s_bytes = s_bytes.rjust(curve_bytes, b'\x00')
+        
+        return r_bytes + s_bytes
+    except Exception:
+        # If parsing fails, return raw bytes and hope the API handles it
+        return asn1_sig
+
+

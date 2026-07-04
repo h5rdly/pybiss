@@ -131,16 +131,30 @@ def parse_certificate(der_bytes: bytes) -> dict:
     _, subject_val = tbs.read_tlv()
     subject = _parse_name(subject_val)
     
-    # SubjectPublicKeyInfo (SPKI) -> RSA Modulus and Exponent
+    # SubjectPublicKeyInfo (SPKI) -> Extract Key Type and Parameters
     _, spki_val = tbs.read_tlv()
     spki = DerReader(spki_val)
-    spki.read_tlv() # Skip AlgorithmIdentifier
-    bit_string = spki.read_tlv()[1]
+    # Read AlgorithmIdentifier
+    _, alg_id_val = spki.read_tlv()
+    alg_id = DerReader(alg_id_val)
+    _, oid = alg_id.read_tlv()
+    n, e = 0, 0
+    key_type = 'UNKNOWN'
     
-    pkcs1 = DerReader(bit_string[1:]).read_seq()
-    n = int.from_bytes(pkcs1.read_tlv()[1], 'big')
-    e = int.from_bytes(pkcs1.read_tlv()[1], 'big')
+    # rsaEncryption OID: 1.2.840.113549.1.1.1
+    if oid == b'\x2a\x86\x48\x86\xf7\x0d\x01\x01\x01':
+        key_type = 'RSA'
+        bit_string = spki.read_tlv()[1]
+        pkcs1 = DerReader(bit_string[1:]).read_seq()
+        n = int.from_bytes(pkcs1.read_tlv()[1], 'big')
+        e = int.from_bytes(pkcs1.read_tlv()[1], 'big')
+        
+    # ecPublicKey OID: 1.2.840.10045.2.1
+    elif oid == b'\x2a\x86\x48\xce\x3d\x02\x01':
+        key_type = 'EC'
+        # We don't need to parse the curve parameters for hardware signing
     
+
     # Extract Key Usages and AKI from Extensions
     usages, aki = [], ''
     while not tbs.is_empty():
@@ -173,7 +187,8 @@ def parse_certificate(der_bytes: bytes) -> dict:
     return {
         'serial': serial, 'issuer': issuer, 'subject': subject,
         'not_before': not_before, 'not_after': not_after,
-        'key_usages': usages, 'aki': aki, 'n': n, 'e': e
+        'key_usages': usages, 'aki': aki, 'n': n, 'e': e,
+        'key_type': key_type,
     }
 
 
