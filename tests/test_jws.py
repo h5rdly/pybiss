@@ -1,0 +1,119 @@
+import sys, unittest
+
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
+
+from src import jws
+from src.service import build_certificate_chain
+from tests.x509_helpers import build_cert, make_jws
+
+PROD_ACA = '07DCAA307698B7854B6D0318C8E3CDA77B3682EF'
+
+RENEW_EXT = {jws.OID_RENEW_FUNCTIONS: jws.RENEW_MARKER}
+ADMIN_EXT = {jws.OID_ADMIN_FUNCTIONS: jws.ADMIN_MARKER}
+
+PAYLOAD = {'vendorName': 'GEMALTO', 'serNum': '1234567890'}
+
+
+def _cert(**kw):
+    kw.setdefault('aki', PROD_ACA)
+    kw.setdefault('ext_texts', RENEW_EXT)
+    return build_cert(**kw)
+
+
+class TestJwsVerify(unittest.TestCase):
+
+    def test_valid_renew_jws_returns_payload(self):
+        ''' A correctly signed JWS from a renew-authorized cert decodes to its payload '''
+
+        token = make_jws(PAYLOAD, _cert())
+        self.assertEqual(jws.verify(token), PAYLOAD)
+
+    def test_renew_cert_rejected_when_admin_required(self):
+        ''' Renew-level authorization must not unlock admin-only operations '''
+
+        token = make_jws(PAYLOAD, _cert())
+        with self.assertRaises(jws.JwsError):
+            jws.verify(token, admin_required=True)
+
+    def test_admin_cert_passes_admin_required(self):
+        token = make_jws(PAYLOAD, _cert(ext_texts=ADMIN_EXT))
+        self.assertEqual(jws.verify(token, admin_required=True), PAYLOAD)
+
+    def test_cert_without_authorization_rejected(self):
+        token = make_jws(PAYLOAD, _cert(ext_texts={}))
+        with self.assertRaises(jws.JwsError):
+            jws.verify(token)
+
+    def test_alg_none_rejected(self):
+        ''' The classic alg:none forgery must be rejected before any other check '''
+
+        token = make_jws(PAYLOAD, _cert(), alg='none')
+        with self.assertRaises(jws.JwsError):
+            jws.verify(token)
+
+    def test_hmac_alg_rejected(self):
+        ''' HS* is rejected outright (HMAC key-confusion attack) '''
+
+        token = make_jws(PAYLOAD, _cert(), alg='HS256')
+        with self.assertRaises(jws.JwsError):
+            jws.verify(token)
+
+    def test_tampered_payload_rejected(self):
+        token = make_jws(PAYLOAD, _cert(), tamper=True)
+        with self.assertRaises(jws.JwsError):
+            jws.verify(token)
+
+    def test_unknown_issuer_rejected(self):
+        ''' A cert not issued by a pinned B-Trust CA fails even with a valid signature '''
+
+        token = make_jws(PAYLOAD, _cert(aki='AA' * 20))
+        with self.assertRaises(jws.JwsError):
+            jws.verify(token)
+
+    def test_expired_certificate_rejected(self):
+        token = make_jws(PAYLOAD, _cert(not_before='200101000000Z', not_after='210101000000Z'))
+        with self.assertRaises(jws.JwsError):
+            jws.verify(token)
+
+    def test_missing_x5c_rejected(self):
+        token = make_jws(PAYLOAD, _cert())
+        # Strip the certificate by rebuilding the header segment
+        import base64, json
+        head = json.loads(base64.urlsafe_b64decode(token.split('.')[0] + '=='))
+        del head['x5c']
+        from tests.x509_helpers import b64url
+        broken = b64url(json.dumps(head).encode()) + '.' + '.'.join(token.split('.')[1:])
+        with self.assertRaises(jws.JwsError):
+            jws.verify(broken)
+
+    def test_garbage_input_rejected(self):
+        for garbage in ('', 'not-a-jws', 'a.b', 'a.b.c.d', '..'):
+            with self.assertRaises(jws.JwsError):
+                jws.verify(garbage)
+
+
+class TestBuildCertificateChain(unittest.TestCase):
+
+    def setUp(self):
+        self.root = build_cert(cn='Root', ski='03' * 20)                      # self-signed: no AKI
+        self.inter = build_cert(cn='Inter', ski='02' * 20, aki='03' * 20)
+        self.leaf = build_cert(cn='Leaf', ski='01' * 20, aki='02' * 20)
+        self.stranger = build_cert(cn='Other', ski='09' * 20, aki='08' * 20)
+
+    def test_chain_ordered_leaf_to_root(self):
+        candidates = [self.stranger, self.root, self.inter]  # deliberately shuffled
+        chain = build_certificate_chain(self.leaf, candidates)
+        self.assertEqual(chain, [self.leaf, self.inter, self.root])
+
+    def test_missing_intermediate_ends_chain_early(self):
+        chain = build_certificate_chain(self.leaf, [self.root, self.stranger])
+        self.assertEqual(chain, [self.leaf])
+
+    def test_self_signed_leaf_stands_alone(self):
+        lone = build_cert(cn='Lone', ski='05' * 20, aki='05' * 20)
+        chain = build_certificate_chain(lone, [self.root, self.inter])
+        self.assertEqual(chain, [lone])
+
+
+if __name__ == '__main__':
+    unittest.main()

@@ -1,48 +1,12 @@
 import sys, hashlib, ctypes
 from ctypes import (
-    POINTER, c_void_p, c_ubyte, byref, Structure, cast, string_at, c_wchar_p, 
+    POINTER, c_void_p, c_ubyte, byref, Structure, cast, string_at, c_wchar_p,
 )
 
-if (IS_WINDOWS := sys.platform == 'win32'):
-    from ctypes import wintypes, GetLastError
-    crypt32 = ctypes.windll.crypt32
-    ncrypt = ctypes.windll.ncrypt
-    advapi32 = ctypes.windll.advapi32
+IS_WINDOWS = sys.platform == 'win32'
 
-    advapi32.CryptReleaseContext.restype = wintypes.BOOL
-    advapi32.CryptReleaseContext.argtypes = [c_void_p, wintypes.DWORD]
-    
-    # Set proper 64-bit pointer return types and argument types to prevent truncation crashes
-    crypt32.CertOpenStore.restype = c_void_p
-    crypt32.CertOpenStore.argtypes = [c_void_p, wintypes.DWORD, c_void_p, wintypes.DWORD, c_wchar_p]
-    
-    crypt32.CertEnumCertificatesInStore.restype = c_void_p
-    crypt32.CertEnumCertificatesInStore.argtypes = [c_void_p, c_void_p]
-    
-    crypt32.CertDuplicateCertificateContext.restype = c_void_p
-    crypt32.CertDuplicateCertificateContext.argtypes = [c_void_p]
-    
-    crypt32.CertFreeCertificateContext.restype = wintypes.BOOL
-    crypt32.CertFreeCertificateContext.argtypes = [c_void_p]
-    
-    crypt32.CertCloseStore.restype = wintypes.BOOL
-    crypt32.CertCloseStore.argtypes = [c_void_p, wintypes.DWORD]
-    
-    crypt32.CryptAcquireCertificatePrivateKey.restype = wintypes.BOOL
-    crypt32.CryptAcquireCertificatePrivateKey.argtypes = [
-        c_void_p, wintypes.DWORD, c_void_p, POINTER(c_void_p), POINTER(wintypes.DWORD), POINTER(wintypes.BOOL)
-    ]
-    
-    ncrypt.NCryptSetProperty.restype = wintypes.DWORD
-    ncrypt.NCryptSetProperty.argtypes = [c_void_p, c_wchar_p, c_void_p, wintypes.DWORD, wintypes.DWORD]
-    
-    ncrypt.NCryptSignHash.restype = wintypes.DWORD
-    ncrypt.NCryptSignHash.argtypes = [
-        c_void_p, c_void_p, c_void_p, wintypes.DWORD, c_void_p, wintypes.DWORD, POINTER(wintypes.DWORD), wintypes.DWORD
-    ]
-    
-    ncrypt.NCryptFreeObject.restype = wintypes.DWORD
-    ncrypt.NCryptFreeObject.argtypes = [c_void_p]
+if IS_WINDOWS:
+    from ctypes import wintypes, GetLastError
 else:
     # Dummy definitions to allow the rest of the file to parse safely on Linux CI
     class wintypes:
@@ -72,13 +36,82 @@ class CERT_CONTEXT(Structure):
 
 class BCRYPT_PKCS1_PADDING_INFO(Structure):
     # Using c_wchar_p automatically handles UTF-16LE encoding for Windows APIs
-    _fields_ = [("pszAlgId", c_wchar_p)] 
+    _fields_ = [("pszAlgId", c_wchar_p)]
 
 
-def get_windows_certificates() -> list[dict]:
+class NativeLibs:
+    '''
+    The Windows crypto DLL handles a call operates on.
+    Production resolves them lazily via _load_native_libs(); tests pass fakes.
+    '''
+
+    def __init__(self, crypt32, ncrypt, advapi32, get_last_error=GetLastError):
+        self.crypt32 = crypt32
+        self.ncrypt = ncrypt
+        self.advapi32 = advapi32
+        self.get_last_error = get_last_error
+
+
+_native_libs = None
+
+def _load_native_libs() -> NativeLibs:
+    ''' Lazily binds the real Windows DLLs and sets their signatures once '''
+
+    global _native_libs
+    if _native_libs is not None:
+        return _native_libs
+
+    crypt32 = ctypes.windll.crypt32
+    ncrypt = ctypes.windll.ncrypt
+    advapi32 = ctypes.windll.advapi32
+
+    # Set proper 64-bit pointer return types and argument types to prevent truncation crashes
+    crypt32.CertOpenStore.restype = c_void_p
+    crypt32.CertOpenStore.argtypes = [c_void_p, wintypes.DWORD, c_void_p, wintypes.DWORD, c_wchar_p]
+
+    crypt32.CertEnumCertificatesInStore.restype = c_void_p
+    crypt32.CertEnumCertificatesInStore.argtypes = [c_void_p, c_void_p]
+
+    crypt32.CertDuplicateCertificateContext.restype = c_void_p
+    crypt32.CertDuplicateCertificateContext.argtypes = [c_void_p]
+
+    crypt32.CertFreeCertificateContext.restype = wintypes.BOOL
+    crypt32.CertFreeCertificateContext.argtypes = [c_void_p]
+
+    crypt32.CertCloseStore.restype = wintypes.BOOL
+    crypt32.CertCloseStore.argtypes = [c_void_p, wintypes.DWORD]
+
+    crypt32.CryptAcquireCertificatePrivateKey.restype = wintypes.BOOL
+    crypt32.CryptAcquireCertificatePrivateKey.argtypes = [
+        c_void_p, wintypes.DWORD, c_void_p, POINTER(c_void_p), POINTER(wintypes.DWORD), POINTER(wintypes.BOOL)
+    ]
+
+    advapi32.CryptReleaseContext.restype = wintypes.BOOL
+    advapi32.CryptReleaseContext.argtypes = [c_void_p, wintypes.DWORD]
+
+    ncrypt.NCryptSetProperty.restype = wintypes.DWORD
+    ncrypt.NCryptSetProperty.argtypes = [c_void_p, c_wchar_p, c_void_p, wintypes.DWORD, wintypes.DWORD]
+
+    ncrypt.NCryptSignHash.restype = wintypes.DWORD
+    ncrypt.NCryptSignHash.argtypes = [
+        c_void_p, c_void_p, c_void_p, wintypes.DWORD, c_void_p, wintypes.DWORD, POINTER(wintypes.DWORD), wintypes.DWORD
+    ]
+
+    ncrypt.NCryptFreeObject.restype = wintypes.DWORD
+    ncrypt.NCryptFreeObject.argtypes = [c_void_p]
+
+    _native_libs = NativeLibs(crypt32, ncrypt, advapi32)
+    return _native_libs
+
+
+def get_windows_certificates(libs: NativeLibs = None) -> list[dict]:
     ''' Queries the Windows Certificate Store for Smart Card certificates '''
-    if not IS_WINDOWS:
-        return []
+
+    if libs is None:
+        if not IS_WINDOWS:
+            return []
+        libs = _load_native_libs()
+    crypt32 = libs.crypt32
 
     certs = []
     # c_wchar_p is required for Windows Unicode API variants
@@ -92,33 +125,44 @@ def get_windows_certificates() -> list[dict]:
     while pCertCtx:
         cert_ctx = cast(pCertCtx, POINTER(CERT_CONTEXT)).contents
         der_data = string_at(cert_ctx.pbCertEncoded, cert_ctx.cbCertEncoded)
-        
+
         # CertEnumCertificatesInStore frees the context on the next loop.
         # We duplicate the context to safely keep a pointer to it in Python.
         dup_ctx = crypt32.CertDuplicateCertificateContext(pCertCtx)
-        
+
         certs.append({
             'der': der_data,
-            'windows_ctx': dup_ctx 
+            'windows_ctx': dup_ctx
         })
-        
+
         pCertCtx = crypt32.CertEnumCertificatesInStore(hStore, pCertCtx)
 
     crypt32.CertCloseStore(hStore, 0)
     return certs
 
 
-def free_windows_certificate(cert_ctx_pointer):
+def free_windows_certificate(cert_ctx_pointer, libs: NativeLibs = None):
     ''' Prevents memory leaks by freeing the duplicated certificate context '''
-    if IS_WINDOWS and cert_ctx_pointer:
-        crypt32.CertFreeCertificateContext(c_void_p(cert_ctx_pointer))
+
+    if not cert_ctx_pointer:
+        return
+    if libs is None:
+        if not IS_WINDOWS:
+            return
+        libs = _load_native_libs()
+    libs.crypt32.CertFreeCertificateContext(c_void_p(cert_ctx_pointer))
 
 
-def sign_payload_windows(cert_ctx_pointer, payload: bytes, pin: str = None, hash_alg: str = "SHA256") -> bytes:
+def sign_payload_windows(cert_ctx_pointer, payload: bytes, pin: str = None,
+                         hash_alg: str = "SHA256", libs: NativeLibs = None) -> bytes:
     ''' Native Windows Smart Card Signing (CNG) '''
-    if not IS_WINDOWS:
-        raise Exception("Windows native signing is not supported on this OS")
-        
+
+    if libs is None:
+        if not IS_WINDOWS:
+            raise Exception("Windows native signing is not supported on this OS")
+        libs = _load_native_libs()
+    crypt32, ncrypt = libs.crypt32, libs.ncrypt
+
     hCryptProvOrNCryptKey = c_void_p()
     dwKeySpec = wintypes.DWORD()
     pfCallerFreeProv = wintypes.BOOL()
@@ -132,14 +176,14 @@ def sign_payload_windows(cert_ctx_pointer, payload: bytes, pin: str = None, hash
         byref(dwKeySpec),
         byref(pfCallerFreeProv)
     )
-    
+
     if not res:
-        raise Exception(f"Failed to acquire private key. Error: {GetLastError()}")
+        raise Exception(f"Failed to acquire private key. Error: {libs.get_last_error()}")
 
     # dwKeySpec == 0xFFFFFFFF means it's an NCrypt (CNG) key
     if dwKeySpec.value != CERT_NCRYPT_KEY_SPEC:
         if pfCallerFreeProv.value:
-            advapi32.CryptReleaseContext(hCryptProvOrNCryptKey, 0)
+            libs.advapi32.CryptReleaseContext(hCryptProvOrNCryptKey, 0)
         raise Exception("Legacy CSP keys are not supported. Please use a modern CNG Smart Card.")
 
     try:
@@ -147,10 +191,10 @@ def sign_payload_windows(cert_ctx_pointer, payload: bytes, pin: str = None, hash
         if pin:
             pin_utf16 = pin.encode('utf-16le') + b'\x00\x00'
             status = ncrypt.NCryptSetProperty(
-                hCryptProvOrNCryptKey, 
-                c_wchar_p(NCRYPT_PIN_PROPERTY), 
-                pin_utf16, 
-                len(pin_utf16), 
+                hCryptProvOrNCryptKey,
+                c_wchar_p(NCRYPT_PIN_PROPERTY),
+                pin_utf16,
+                len(pin_utf16),
                 0
             )
             if status != 0:
@@ -172,7 +216,7 @@ def sign_payload_windows(cert_ctx_pointer, payload: bytes, pin: str = None, hash
         pad_info.pszAlgId = hash_alg_upper
 
         cbSignature = wintypes.DWORD(0)
-        
+
         # 1st Call: NCryptSignHash with a NULL buffer to get the required signature size
         status = ncrypt.NCryptSignHash(
             hCryptProvOrNCryptKey,

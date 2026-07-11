@@ -1,5 +1,5 @@
 import base64, sys, hashlib, unittest 
-from unittest.mock import patch
+
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
@@ -79,20 +79,17 @@ class TestService(unittest.TestCase):
         assert len(filtered_bad) == 0
 
 
-    @patch('time.time')
-    def test_filter_certificates_validity_dates_real(self, mock_time):
-        ''' Freezes time to test real certificate expiration boundaries natively '''
+    def test_filter_certificates_validity_dates_real(self):
+        ''' Pins the evaluation time to test real certificate expiration boundaries '''
 
         certs = [{'id': b'1', 'der': CERT_BYTES}]
-        
-        # Freeze time to 2016 (Inside the 2015-2018 validity window)
-        mock_time.return_value = 1451606400
-        valid_certs = service.filter_certificates(certs, selector=None, show_valid_certs=True)
+
+        # 2016: inside the 2015-2018 validity window
+        valid_certs = service.filter_certificates(certs, selector=None, show_valid_certs=True, now=1451606400)
         assert len(valid_certs) == 1
 
-        # Freeze time to 2020 (Expired)
-        mock_time.return_value = 1577836800 
-        expired_certs = service.filter_certificates(certs, selector=None, show_valid_certs=True)
+        # 2020: expired
+        expired_certs = service.filter_certificates(certs, selector=None, show_valid_certs=True, now=1577836800)
         assert len(expired_certs) == 0
 
 

@@ -91,6 +91,34 @@ def change_card_pin(funcs, slot_id: int, old_pin: str, new_pin: str):
         funcs.C_Finalize(None)
 
 
+def change_card_puk(funcs, slot_id: int, old_puk: str, new_puk: str):
+    ''' C_SetPIN in an SO session: changes the Security Officer PIN (PUK) '''
+
+    funcs.C_Initialize(None)
+    session = CK_SESSION_HANDLE()
+    res = funcs.C_OpenSession(slot_id, CKF_SERIAL_SESSION | CKF_RW_SESSION, None, None, byref(session))
+    if res != CKR_OK:
+        funcs.C_Finalize(None)
+        raise Exception(f"Failed to open session: {hex(res)}")
+
+    try:
+        old_b = old_puk.encode('utf-8')
+        old_arr = (CK_BYTE * len(old_b))(*old_b)
+        res = funcs.C_Login(session, CKU_SO, old_arr, len(old_b))
+        if res != CKR_OK:
+            raise Exception("PUK rejected. Security Officer login failed.")
+
+        # In an SO session, C_SetPIN changes the SO PIN (the PUK)
+        new_b = new_puk.encode('utf-8')
+        new_arr = (CK_UTF8CHAR * len(new_b))(*new_b)
+        res = funcs.C_SetPIN(session, old_arr, len(old_b), new_arr, len(new_b))
+        if res != CKR_OK: raise Exception(f"Failed to change PUK: {hex(res)}")
+    finally:
+        funcs.C_Logout(session)
+        funcs.C_CloseSession(session)
+        funcs.C_Finalize(None)
+
+
 def unblock_card_pin(funcs, slot_id: int, puk: str, new_pin: str):
     ''' C_InitPIN: SO login using PUK to reset User PIN '''
 

@@ -87,6 +87,19 @@ def _parse_name(name_der: bytes) -> str:
 
 
 
+def _decode_oid(oid_bytes: bytes) -> str:
+    ''' Decodes DER OID content bytes to dotted notation (e.g. 2.5.29.14) '''
+
+    parts = [str(oid_bytes[0] // 40), str(oid_bytes[0] % 40)]
+    val = 0
+    for b in oid_bytes[1:]:
+        val = (val << 7) | (b & 0x7F)
+        if not b & 0x80:
+            parts.append(str(val))
+            val = 0
+    return '.'.join(parts)
+
+
 def _parse_time(tag: int, val: bytes) -> int:
 
     s = val.decode('ascii')
@@ -155,8 +168,9 @@ def parse_certificate(der_bytes: bytes) -> dict:
         # We don't need to parse the curve parameters for hardware signing
     
 
-    # Extract Key Usages and AKI from Extensions
-    usages, aki = [], ''
+    # Extract Key Usages, AKI, SKI and the full extension map
+    usages, aki, ski = [], '', ''
+    extensions = {}
     while not tbs.is_empty():
         ext_tag, ext_val = tbs.read_tlv()
         if ext_tag == 0xA3: # Extensions [3]
@@ -164,11 +178,14 @@ def parse_certificate(der_bytes: bytes) -> dict:
             while not ext_seq.is_empty():
                 ext = DerReader(ext_seq.read_tlv()[1])
                 oid = ext.read_tlv()[1]
-                
+
                 e_tag, e_val = ext.read_tlv()
                 if e_tag == 0x01: # Skip Boolean CRITICAL flag
                     e_tag, e_val = ext.read_tlv()
-                    
+
+                # Raw extension value (OCTET STRING content) keyed by dotted OID
+                extensions[_decode_oid(oid)] = e_val
+
                 if oid == b'\x55\x1d\x0f': # Key Usage
                     bits = DerReader(e_val).read_tlv()[1]
                     if len(bits) > 1:
@@ -184,11 +201,14 @@ def parse_certificate(der_bytes: bytes) -> dict:
                         if a_tag == 0x80: # [0] KeyIdentifier
                             aki = a_val.hex().upper()
 
+                elif oid == b'\x55\x1d\x0e': # Subject Key Identifier (SKI)
+                    ski = DerReader(e_val).read_tlv()[1].hex().upper()
+
     return {
         'serial': serial, 'issuer': issuer, 'subject': subject,
         'not_before': not_before, 'not_after': not_after,
-        'key_usages': usages, 'aki': aki, 'n': n, 'e': e,
-        'key_type': key_type,
+        'key_usages': usages, 'aki': aki, 'ski': ski, 'n': n, 'e': e,
+        'key_type': key_type, 'extensions': extensions,
     }
 
 

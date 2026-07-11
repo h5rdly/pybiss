@@ -1,5 +1,4 @@
 import sys, unittest
-from unittest.mock import patch
 
 from mocks import FakeMSCAPI, DummyWindowsLibrary
 
@@ -12,12 +11,8 @@ class TestMSCAPI(unittest.TestCase):
 
     def setUp(self):
 
-        # Force the module to believe it's running on Windows
-        self.is_windows_patcher = patch('src.mscapi.IS_WINDOWS', True)
-        self.is_windows_patcher.start()
-
         self.state = FakeMSCAPI()
-        
+
         # Build the fake crypt32.dll
         self.mock_crypt32 = DummyWindowsLibrary()
         self.mock_crypt32.CertOpenStore = self.state.cb_CertOpenStore
@@ -37,58 +32,50 @@ class TestMSCAPI(unittest.TestCase):
         self.mock_ncrypt.NCryptSignHash = self.state.cb_NCryptSignHash
         self.mock_ncrypt.NCryptFreeObject = self.state.cb_NCryptFreeObject
 
-        # Inject them into mscapi
-        self.crypt32_patcher = patch('src.mscapi.crypt32', self.mock_crypt32, create=True)
-        self.ncrypt_patcher = patch('src.mscapi.ncrypt', self.mock_ncrypt, create=True)
-        self.advapi32_patcher = patch('src.mscapi.advapi32', self.mock_advapi32, create=True)
-
-        self.crypt32_patcher.start()
-        self.ncrypt_patcher.start()
-        self.advapi32_patcher.start()
-
-    def tearDown(self):
-        self.is_windows_patcher.stop()
-        self.crypt32_patcher.stop()
-        self.ncrypt_patcher.stop()
-        self.advapi32_patcher.stop()
+        # Inject them the same way hardware tests inject a loader: as a parameter
+        self.libs = mscapi.NativeLibs(
+            self.mock_crypt32, self.mock_ncrypt, self.mock_advapi32,
+            get_last_error=lambda: 0,
+        )
 
 
     def test_get_windows_certificates_success(self):
         ''' PROVES: Retrieves, duplicates, and securely un-pointers Windows certificates '''
-        
-        certs = mscapi.get_windows_certificates()
+
+        certs = mscapi.get_windows_certificates(libs=self.libs)
         assert len(certs) == 1
-        assert certs[0]['der'] == b'der_certificate_data' 
+        assert certs[0]['der'] == b'der_certificate_data'
         assert certs[0]['windows_ctx'] == 99999
 
 
-    @patch('src.mscapi.CERT_STORE_PROV_SYSTEM', 0)
     def test_get_windows_certificates_store_fail(self):
         ''' Gracefully raises if the System Store cannot be opened '''
 
+        self.libs.crypt32.CertOpenStore = lambda *args: None
         with self.assertRaises(Exception) as context:
-            mscapi.get_windows_certificates()
+            mscapi.get_windows_certificates(libs=self.libs)
         assert "Failed to open Windows Certificate Store" in str(context.exception)
 
 
     def test_free_windows_certificate(self):
         ''' Securely frees duplicated memory contexts '''
 
-        mscapi.free_windows_certificate(99999)
+        mscapi.free_windows_certificate(99999, libs=self.libs)
         assert self.state.contexts_freed == 1
-        mscapi.free_windows_certificate(None)
+        mscapi.free_windows_certificate(None, libs=self.libs)
 
 
     def test_sign_payload_windows_success(self):
         ''' End-to-end CNG signing passes PIN, sizes buffer, and signs payload natively '''
 
         signature = mscapi.sign_payload_windows(
-            cert_ctx_pointer=123, 
-            payload=b'transaction_data', 
-            pin='1234', 
-            hash_alg='SHA256'
+            cert_ctx_pointer=123,
+            payload=b'transaction_data',
+            pin='1234',
+            hash_alg='SHA256',
+            libs=self.libs,
         )
-        assert self.state.last_pin_bytes == b'1\x002\x003\x004\x00\x00\x00' 
+        assert self.state.last_pin_bytes == b'1\x002\x003\x004\x00\x00\x00'
         assert len(signature) == 256
 
 
@@ -97,32 +84,33 @@ class TestMSCAPI(unittest.TestCase):
 
         self.state.is_legacy_csp = True
         with self.assertRaises(Exception) as context:
-            mscapi.sign_payload_windows(cert_ctx_pointer=123, payload=b'data')
+            mscapi.sign_payload_windows(cert_ctx_pointer=123, payload=b'data', libs=self.libs)
         assert "Legacy CSP keys are not supported" in str(context.exception)
 
 
-    @patch('src.mscapi.GetLastError', return_value=5, create=True)
-    def test_sign_payload_windows_acquire_fails(self, mock_get_last_error):
+    def test_sign_payload_windows_acquire_fails(self):
         ''' Windows crypto failures bubble up natively '''
 
         self.state.acquire_should_fail = True
+        self.libs.get_last_error = lambda: 5
         with self.assertRaises(Exception) as context:
-            mscapi.sign_payload_windows(cert_ctx_pointer=123, payload=b'data')
+            mscapi.sign_payload_windows(cert_ctx_pointer=123, payload=b'data', libs=self.libs)
         assert "Failed to acquire private key" in str(context.exception)
+        assert "5" in str(context.exception)
 
 
+    @unittest.skipIf(sys.platform == 'win32', 'Real DLLs would be bound on Windows')
     def test_non_windows_os_blocks_execution(self):
         ''' Running the module on Linux/Mac fails safely without crashing '''
 
-        with patch('src.mscapi.IS_WINDOWS', False):
-            certs = mscapi.get_windows_certificates()
-            assert certs == []
-            
-            with self.assertRaises(Exception) as ctx:
-                mscapi.sign_payload_windows(123, b'payload')
-            assert "Windows native signing is not supported on this OS" in str(ctx.exception)
-            
-            mscapi.free_windows_certificate(123)
+        certs = mscapi.get_windows_certificates()
+        assert certs == []
+
+        with self.assertRaises(Exception) as ctx:
+            mscapi.sign_payload_windows(123, b'payload')
+        assert "Windows native signing is not supported on this OS" in str(ctx.exception)
+
+        mscapi.free_windows_certificate(123)
 
 
 if __name__ == '__main__':

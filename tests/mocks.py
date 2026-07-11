@@ -424,3 +424,37 @@ class FakeSmartCardConnection:
             return self.transmit_responses.pop(0)
             
         return b'\x90\x00' # Default to ISO 7816 Success
+
+
+class FakeUI:
+    ''' Scripted UI provider: answers prompts without any user interaction '''
+
+    def __init__(self, pin: str = '1234', choice: int = 0, confirm: bool = True):
+        self.pin = pin
+        self.choice = choice
+        self.confirm = confirm
+
+    def prompt_pin(self, attempt: int = 1, label: str = 'PIN') -> str:
+        return self.pin
+
+    def choose_certificate(self, certs: list) -> int:
+        return self.choice
+
+    def confirm_sign(self, text: str, additional_text: str = None) -> bool:
+        return self.confirm
+
+
+class ForbiddenUI:
+    ''' UI provider that must never be reached - any prompt fails the test '''
+
+    def _trip(self, method: str):
+        raise AssertionError(f'UI must not be reached, but {method} was called')
+
+    def prompt_pin(self, attempt: int = 1, label: str = 'PIN') -> str:
+        self._trip('prompt_pin')
+
+    def choose_certificate(self, certs: list) -> int:
+        self._trip('choose_certificate')
+
+    def confirm_sign(self, text: str, additional_text: str = None) -> bool:
+        self._trip('confirm_sign')

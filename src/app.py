@@ -5,6 +5,7 @@ sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 import detector as detector
 import hardware as hardware
 import service as service
+import jws as jws
 
 from config import config
 from server import MiniServer
@@ -21,7 +22,7 @@ app = MiniServer()
 @app.get('/version')
 def get_version(req):
     return {
-        'version': 'pybiss-1.0.0',
+        'version': config.get('bissVersion', '3.46'),
         'httpMethods': 'GET, POST',
         'contentTypes': 'data, digest',
         'signatureTypes': 'signature',
@@ -32,31 +33,42 @@ def get_version(req):
 
 @app.get('/status')
 def get_status(req):
-    atrs = detector.get_connected_atrs()
-    lib_path = detector.auto_detect_library()
-    return {
-        'status': 'ok' if atrs else 'no_cards_detected',
-        'readers': atrs,
-        'driver': lib_path
-    }
+    # The official daemon answers with the literal JSON string "".
+    # Diagnostics live in /getInfo instead.
+    return ''
 
 
-@app.get('/getSerialNumber')
+@app.post('/close')
+def close_daemon(req):
+    app.request_shutdown()
+    # The official daemon returns this bare string despite the JSON content type
+    return b'Signing service successfully closed!'
+
+
+@app.post('/getSerialNumber')
 def get_serial_number(req):
-    
+
+    try:
+        jws.verify(req.json.get('jwsData', ''))
+    except jws.JwsError as e:
+        return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
+
     lib_path = detector.auto_detect_library()
     if not lib_path:
         return {'status': 'error', 'reasonCode': 400, 'reasonText': 'No supported smart cards detected'}
-        
+
     try:
         funcs = hardware.load_pkcs11(lib_path)
         slots = hardware.get_slots(funcs, token_present=True)
         if not slots:
             return {'status': 'error', 'reasonCode': 404, 'reasonText': 'No token present'}
-            
+
         serial = hardware.get_token_serial_number(funcs, slots[0])
-        # The Java app returns keysize and vendor too, but serial is the most critical
-        return {'serialNumber': serial, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
+        provider = next((p for p in map(detector.identify_provider, detector.get_connected_atrs()) if p), None)
+        # Recent B-Trust Gemalto cards (940B/940C) carry 3072-bit keys
+        key_size = 3072 if provider == 'GEMALTO' else 2048
+        return {'cardSerialNumber': serial, 'vendor': provider, 'keySize': key_size,
+                'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
 
@@ -64,19 +76,48 @@ def get_serial_number(req):
 @app.post('/setPIN')
 def set_pin(req):
 
-    data = req.json
-    old_pin = data.get('oldPIN')
-    new_pin = data.get('newPIN')
-    
+    try:
+        jws.verify(req.json.get('jwsData', ''))
+    except jws.JwsError as e:
+        return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
+
+    # The PINs are never part of the request - the daemon prompts locally
+    ui_provider = get_ui_provider()
+    old_pin = ui_provider.prompt_pin(label='current PIN')
+    new_pin = ui_provider.prompt_pin(label='new PIN') if old_pin else None
     if not old_pin or not new_pin:
-        return {'status': 'error', 'reasonCode': 400, 'reasonText': 'Missing PIN data'}
+        return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN entry canceled'}
 
     lib_path = detector.auto_detect_library()
     try:
         funcs = hardware.load_pkcs11(lib_path)
         slots = hardware.get_slots(funcs, token_present=True)
         hardware.change_card_pin(funcs, slots[0], old_pin, new_pin)
-        return {'status': 'ok', 'reasonCode': 200, 'reasonText': 'PIN successfully changed'}
+        return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': 'PIN successfully changed'}
+    except Exception as e:
+        return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
+
+
+@app.post('/setPUK')
+def set_puk(req):
+
+    try:
+        jws.verify(req.json.get('jwsData', ''))
+    except jws.JwsError as e:
+        return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
+
+    ui_provider = get_ui_provider()
+    old_puk = ui_provider.prompt_pin(label='current PUK')
+    new_puk = ui_provider.prompt_pin(label='new PUK') if old_puk else None
+    if not old_puk or not new_puk:
+        return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PUK entry canceled'}
+
+    lib_path = detector.auto_detect_library()
+    try:
+        funcs = hardware.load_pkcs11(lib_path)
+        slots = hardware.get_slots(funcs, token_present=True)
+        hardware.change_card_puk(funcs, slots[0], old_puk, new_puk)
+        return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': 'PUK successfully changed'}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
 
@@ -84,21 +125,35 @@ def set_pin(req):
 @app.post('/unblockPIN')
 def unblock_pin(req):
 
-    data = req.json
-    puk = data.get('puk')
-    new_pin = data.get('newPIN')
-    
+    try:
+        # Unblocking requires the administrative authorization level
+        jws.verify(req.json.get('jwsData', ''), admin_required=True)
+    except jws.JwsError as e:
+        return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
+
+    ui_provider = get_ui_provider()
+    puk = ui_provider.prompt_pin(label='PUK')
+    new_pin = ui_provider.prompt_pin(label='new PIN') if puk else None
     if not puk or not new_pin:
-        return {'status': 'error', 'reasonCode': 400, 'reasonText': 'Missing PUK or new PIN'}
+        return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PUK entry canceled'}
 
     lib_path = detector.auto_detect_library()
     try:
         funcs = hardware.load_pkcs11(lib_path)
         slots = hardware.get_slots(funcs, token_present=True)
         hardware.unblock_card_pin(funcs, slots[0], puk, new_pin)
-        return {'status': 'ok', 'reasonCode': 200, 'reasonText': 'PIN successfully unblocked'}
+        return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': 'PIN successfully unblocked'}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
+
+
+def _not_implemented(req):
+    return {'status': 'error', 'reasonCode': 501, 'reasonText': 'Not implemented in pybiss yet'}
+
+# Endpoints the official daemon exposes that pybiss does not support yet.
+# Registered so portals get a proper BISS error envelope instead of a 404.
+for _path in ('/chainFound', '/genSPKAC', '/generatePfx', '/getPfxKeyPair', '/setNewPUKNewPIN', '/v2/renew'):
+    app.post(_path)(_not_implemented)
 
 
 @app.post('/writeCertSC')
@@ -269,10 +324,13 @@ def get_signer(req):
             choice_idx = ui_provider.choose_certificate(filtered_certs)
             if choice_idx == -1:
                 return {'chain': [], 'status': 'error', 'reasonCode': 400, 'reasonText': 'Canceled'}
-                
+
             selected_cert = filtered_certs[choice_idx]
-            cert_b64 = base64.b64encode(selected_cert['der']).decode('utf-8')
-            return {'chain': [cert_b64], 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
+            # The official daemon returns the full chain (leaf -> CA), built here
+            # from the other certificates the store exposes
+            chain_ders = service.build_certificate_chain(selected_cert['der'], [c['der'] for c in raw_certs])
+            chain = [base64.b64encode(der).decode('utf-8') for der in chain_ders]
+            return {'chain': chain, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
         finally:
             # Free contexts to prevent memory leaks!
             for c in raw_certs:
@@ -313,9 +371,12 @@ def get_signer(req):
         return {'chain': [], 'status': 'error', 'reasonCode': 400, 'reasonText': 'Canceled'}
 
     selected_cert = filtered_certs[choice_idx]
-    cert_b64 = base64.b64encode(selected_cert['der']).decode('utf-8')
-    
-    return {'chain': [cert_b64], 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
+    # The official daemon returns the full chain (leaf -> CA), built here from
+    # the CA certificates B-Trust cards carry alongside the personal ones
+    chain_ders = service.build_certificate_chain(selected_cert['der'], [c['der'] for c in all_certs])
+    chain = [base64.b64encode(der).decode('utf-8') for der in chain_ders]
+
+    return {'chain': chain, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
 
 
 @app.post('/sign')

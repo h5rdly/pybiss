@@ -56,6 +56,13 @@ class MiniServer:
     def __init__(self):
         self.routes = {}
         self.cors = None
+        self._shutdown = None  # asyncio.Event, created in run()
+
+    def request_shutdown(self, delay: float = 0.3):
+        ''' Stops the server shortly after the current response is flushed '''
+
+        if self._shutdown is not None:
+            asyncio.get_event_loop().call_later(delay, self._shutdown.set)
 
     def get(self, path: str): return self.route('GET', path)
     def post(self, path: str): return self.route('POST', path)
@@ -110,7 +117,12 @@ class MiniServer:
                             res_data = await handler(req)
                         else:
                             res_data = handler(req)
-                        res_body = json.dumps(res_data).encode('utf-8')
+                        # bytes pass through verbatim (BISS endpoints like /close
+                        # answer with a bare string body despite the JSON content type)
+                        if isinstance(res_data, bytes):
+                            res_body = res_data
+                        else:
+                            res_body = json.dumps(res_data).encode('utf-8')
                         status = '200 OK'
                     except Exception as e:
                         res_body = json.dumps({'error': str(e)}).encode('utf-8')
@@ -145,13 +157,15 @@ class MiniServer:
             ssl_context.load_cert_chain(certfile='localhost.pem', keyfile='localhost.key')
 
         async def serve():
+            self._shutdown = asyncio.Event()
             server = await asyncio.start_server(
                 self.handle_client, host, port, ssl=ssl_context
             )
             protocol = 'https' if use_ssl else 'http'
             print(f'PyBiss Daemon listening on {protocol}://{host}:{port}')
             async with server:
-                await server.serve_forever()
+                await self._shutdown.wait()
+            print('PyBiss Daemon stopped.')
                 
         try:
             asyncio.run(serve())

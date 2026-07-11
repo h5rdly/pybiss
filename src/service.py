@@ -30,11 +30,11 @@ def _match_selector(metadata: dict, selector: dict) -> bool:
     return True
 
 
-def filter_certificates(certs: list[dict], selector: dict = None, show_valid_certs: bool = True) -> list[dict]:
-    ''' Filter certificates based on selector requirements and validity period '''
-    
+def filter_certificates(certs: list[dict], selector: dict = None, show_valid_certs: bool = True, now: int = None) -> list[dict]:
+    ''' Filter certificates based on selector requirements and validity period (at time `now`) '''
+
     filtered = []
-    now = int(time.time())
+    now = int(time.time()) if now is None else now
 
     for c in certs:
         try:
@@ -56,6 +56,42 @@ def filter_certificates(certs: list[dict], selector: dict = None, show_valid_cer
             continue
             
     return filtered
+
+
+def build_certificate_chain(leaf_der: bytes, candidates: list[bytes]) -> list[bytes]:
+    '''
+    Orders certificates leaf -> intermediate(s) -> root by matching each
+    certificate's AKI to the issuer's SKI. Candidates that don't belong to
+    the chain are ignored; a missing link just ends the chain early.
+    '''
+
+    chain = [leaf_der]
+    current = get_x509_metadata(leaf_der)
+
+    while len(chain) < 8:
+        aki = current.get('aki', '')
+        # Self-signed root (no AKI, or AKI == own SKI): chain is complete
+        if not aki or aki == current.get('ski', ''):
+            break
+
+        parent = None
+        for der in candidates:
+            if any(der == c for c in chain):
+                continue
+            try:
+                meta = get_x509_metadata(der)
+            except Exception:
+                continue
+            if meta.get('ski', '') == aki:
+                parent = (der, meta)
+                break
+
+        if not parent:
+            break
+        chain.append(parent[0])
+        current = parent[1]
+
+    return chain
 
 
 def verify_server_signature(payload: bytes, signature: bytes, server_cert_der: bytes, hash_alg: str) -> bool:

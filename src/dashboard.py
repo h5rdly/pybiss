@@ -481,9 +481,9 @@ class ThreadSafeUIProxy:
     it drops a task into the queue and waits for the Main Thread to reply.
     '''
 
-    def prompt_pin(self, attempt: int = 1) -> str:
+    def prompt_pin(self, attempt: int = 1, label: str = 'PIN') -> str:
         res_q = queue.Queue()
-        ui_task_queue.put(('prompt_pin', {'attempt': attempt}, res_q))
+        ui_task_queue.put(('prompt_pin', {'attempt': attempt, 'label': label}, res_q))
         return res_q.get()
 
     def choose_certificate(self, certs: list[dict]) -> int:
@@ -503,12 +503,12 @@ class ModalRenderer:
     def __init__(self, master_window):
         self.master = master_window
 
-    def prompt_pin(self, attempt: int = 1) -> str:
+    def prompt_pin(self, attempt: int = 1, label: str = 'PIN') -> str:
 
         dialog = Toplevel(self.master, title='Security Verification', width=350, height=220)
         result = {'pin': None}
-        
-        msg = 'Enter Smart Card PIN:' if attempt == 1 else f'Incorrect PIN. Try again (Attempt {attempt}):'
+
+        msg = f'Enter Smart Card {label}:' if attempt == 1 else f'Incorrect {label}. Try again (Attempt {attempt}):'
         color = Theme.TEXT if attempt == 1 else Theme.DANGER
         
         Label(dialog, text=msg, fg=color).pack(pady=(25, 10))
