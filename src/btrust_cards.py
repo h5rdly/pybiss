@@ -4,11 +4,11 @@ sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
 from sc_types import SCARDHANDLE
 from sc_ffi import SmartCardConnection
-from sc_apdu import pad_pkcs1_v15_sha256, read_binary_file, build_apdu, decode_ecdsa_signature
+from sc_apdu import pad_pkcs1_v15_sha256, read_binary_file, build_apdu, decode_ecdsa_signature, ber_tlv
 from pkcs15 import parse_pkcs15_filesystem
 
 
-# --- ATR Signatures from OpenSC ---
+# --- Known ATRs for the card families B-Trust issues ---
 IDPRIME_ATRS = [
     '3B7F96000080318065B0850300EF120FFE829000', # IDPrime 840
     '3B7F96000080318065B0855956FB120FFE829000', # IDPrime 940
@@ -39,17 +39,28 @@ SCHSM_ATRS = [
 
 
 
+def _encode_pin(pin: str) -> bytes:
+    '''
+    ASCII PIN padded with 0xFF to 8 bytes. Length is validated strictly:
+    an over-long PIN would produce a malformed APDU, and the card treats
+    any malformed VERIFY the same as a wrong PIN - it burns a retry.
+    '''
+
+    if not 4 <= len(pin) <= 8:
+        raise ValueError('PIN/PUK must be 4 to 8 characters long.')
+    return pin.encode('ascii').ljust(8, b'\xFF')
+
+
 class BaseCardDriver:
     ''' Abstract base class for B-Trust smart cards '''
-    
+
     def __init__(self, connection: SmartCardConnection):
         self.conn = connection
 
     def verify_pin(self, pin: str, pin_ref: int = 0x81):
         ''' Standard ISO 7816-4 PIN Verification '''
 
-        # PIN is ASCII, padded with 0xFF to 8 bytes
-        pin_bytes = pin.encode('ascii').ljust(8, b'\xFF')
+        pin_bytes = _encode_pin(pin)
         # CLA=00, INS=20 (Verify), P1=00, P2=pin_ref, Lc=08
         apdu = bytes([0x00, 0x20, 0x00, pin_ref, 0x08]) + pin_bytes
         
@@ -69,9 +80,7 @@ class BaseCardDriver:
         ''' Standard ISO 7816-4 Change Reference Data (Change PIN) '''
         
         # PINs are ASCII, padded with 0xFF to 8 bytes, concatenated
-        old_bytes = old_pin.encode('ascii').ljust(8, b'\xFF')
-        new_bytes = new_pin.encode('ascii').ljust(8, b'\xFF')
-        payload = old_bytes + new_bytes
+        payload = _encode_pin(old_pin) + _encode_pin(new_pin)
         
         # CLA=00, INS=24 (Change), P1=00, P2=pin_ref, Data=payload
         apdu = build_apdu(0x00, 0x24, 0x00, pin_ref, data=payload)
@@ -86,9 +95,7 @@ class BaseCardDriver:
         ''' Standard ISO 7816-4 Reset Retry Counter (Unblock with PUK) '''
         
         # PUK and New PIN are ASCII, padded with 0xFF to 8 bytes, concatenated
-        puk_bytes = puk.encode('ascii').ljust(8, b'\xFF')
-        new_bytes = new_pin.encode('ascii').ljust(8, b'\xFF')
-        payload = puk_bytes + new_bytes
+        payload = _encode_pin(puk) + _encode_pin(new_pin)
         
         # CLA=00, INS=2C (Reset Retry Counter), P1=00, P2=pin_ref, Data=payload
         apdu = build_apdu(0x00, 0x2C, 0x00, pin_ref, data=payload)
@@ -117,7 +124,7 @@ class BaseCardDriver:
     def set_security_environment(self, key_id: int, is_ecdsa: bool = False):
         raise NotImplementedError
 
-    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False) -> bytes:
+    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False, key_size_bits: int = 2048) -> bytes:
         raise NotImplementedError
 
 
@@ -128,20 +135,35 @@ class BTrustDriver:
     @staticmethod
     def create(connection: SmartCardConnection) -> BaseCardDriver:
         atr = connection.get_atr().hex().upper()
-        
-        if any(a in atr for a in IDPRIME_ATRS):
-            return IDPrimeDriver(connection)
-        elif any(a in atr for a in CARDOS_ATRS):
-            return CardOSDriver(connection)
-        elif any(a in atr for a in ASEPCOS_ATRS):
-            return AsepcosDriver(connection)
-        elif any(a in atr for a in IASECC_ATRS):
-            return IasEccDriver(connection)
-        elif any(a in atr for a in SCHSM_ATRS):
-            return ScHsmDriver(connection)
-        else:
+
+        families = [
+            (IDPRIME_ATRS, IDPrimeDriver),
+            (CARDOS_ATRS, CardOSDriver),
+            (ASEPCOS_ATRS, AsepcosDriver),
+            (IASECC_ATRS, IasEccDriver),
+            (SCHSM_ATRS, ScHsmDriver),
+        ]
+        candidates = [cls for atrs, cls in families if any(a in atr for a in atrs)]
+
+        if not candidates:
             raise Exception(f'Unsupported Smart Card ATR: {atr}')
-            
+        if len(candidates) == 1:
+            return candidates[0](connection)
+
+        # Ambiguous ATR (the Cryptovision JCOP chip carries either a CardOS-style
+        # or an SC-HSM profile): probe by applet selection, most specific first.
+        # CardOS goes last - selecting the Master File succeeds on almost any card.
+        probe_order = [ScHsmDriver, AsepcosDriver, IDPrimeDriver, IasEccDriver, CardOSDriver]
+        for cls in sorted(candidates, key=probe_order.index):
+            driver = cls(connection)
+            try:
+                driver.select_applet()
+                return driver
+            except Exception:
+                continue
+
+        raise Exception(f'No driver could select its applet for ATR: {atr}')
+
 
 class IDPrimeDriver(BaseCardDriver):
     ''' Gemalto IDPrime Implementation '''
@@ -151,7 +173,7 @@ class IDPrimeDriver(BaseCardDriver):
 
     def select_applet(self):
 
-        # From idprime_path: A0 00 00 00 18 80 00 00 00 06 62
+        # Gemalto IDPrime applet AID
         aid = bytes.fromhex('A000000018800000000662')
         apdu = b'\x00\xA4\x04\x00' + bytes([len(aid)]) + aid
         resp = self.conn.transmit(apdu)
@@ -161,7 +183,6 @@ class IDPrimeDriver(BaseCardDriver):
 
     def set_security_environment(self, key_id: int):
 
-        # Translated from idprime_set_security_env()
         # CLA=00, INS=22 (MSE), P1=41 (Set for computation), P2=B6 (Digital Signature)
         # Data: 83 01 <key_id>
         data = bytes([0x83, 0x01, key_id])
@@ -172,22 +193,22 @@ class IDPrimeDriver(BaseCardDriver):
             raise Exception(f'MSE failed: {resp[-2:].hex().upper()}')
 
 
-    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False) -> bytes:
-        
-        # ECDSA uses the raw 32-byte hash. RSA requires PKCS#1 v1.5 padding (256 bytes).
-        payload = raw_hash if is_ecdsa else pad_pkcs1_v15_sha256(raw_hash)
+    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False, key_size_bits: int = 2048) -> bytes:
 
-        # Send the data
-        step1_data = bytes([0x90, len(payload) & 0xFF]) + payload
+        # ECDSA uses the raw 32-byte hash. RSA requires PKCS#1 v1.5 padding to the key size.
+        payload = raw_hash if is_ecdsa else pad_pkcs1_v15_sha256(raw_hash, key_size_bits)
+
+        # Send the data (BER length handles the >255 byte RSA payloads)
+        step1_data = ber_tlv(0x90, payload)
         apdu1 = build_apdu(0x00, 0x2A, 0x90, 0xA0, data=step1_data)
-        
+
         resp1 = self.conn.transmit(apdu1)
         if resp1[-2:] != b'\x90\x00':
             raise Exception('IDPrime signature preparation failed')
 
         # Ask for the cryptographic result
-        # Note: ECDSA returns ~70 bytes (ASN.1), RSA returns 256. Using Le=0/256 handles both.
-        apdu2 = build_apdu(0x00, 0x2A, 0x9E, 0x9A, le=256)
+        # ECDSA returns ~70 bytes (ASN.1); RSA returns exactly the key size in bytes.
+        apdu2 = build_apdu(0x00, 0x2A, 0x9E, 0x9A, le=256 if is_ecdsa else key_size_bits // 8)
         resp2 = self.conn.transmit(apdu2)
         if resp2[-2:] != b'\x90\x00':
             raise Exception(f'IDPrime signature computation failed: {resp2[-2:].hex().upper()}')
@@ -224,12 +245,12 @@ class CardOSDriver(BaseCardDriver):
         if resp[-2:] != b'\x90\x00':
             raise Exception(f'CardOS MSE failed: {resp[-2:].hex().upper()}')
 
-    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False) -> bytes:
+    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False, key_size_bits: int = 2048) -> bytes:
         # ECDSA passes the raw hash directly to the card.
-        payload = raw_hash if is_ecdsa else pad_pkcs1_v15_sha256(raw_hash)
-        
+        payload = raw_hash if is_ecdsa else pad_pkcs1_v15_sha256(raw_hash, key_size_bits)
+
         # One-step computation (triggers Extended APDU for both Lc and Le)
-        apdu = build_apdu(0x00, 0x2A, 0x9E, 0x9A, data=payload, le=256)
+        apdu = build_apdu(0x00, 0x2A, 0x9E, 0x9A, data=payload, le=256 if is_ecdsa else key_size_bits // 8)
         
         resp = self.conn.transmit(apdu)
         if resp[-2:] != b'\x90\x00':
@@ -255,11 +276,11 @@ class AsepcosDriver(BaseCardDriver):
         # It passes the key reference implicitly or during file selection.
         pass
 
-    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False) -> bytes:
-        payload = raw_hash if is_ecdsa else pad_pkcs1_v15_sha256(raw_hash)
-        
-        # CLA=80, INS=14, P1=01, P2=00, Data=payload, Le=256
-        apdu = build_apdu(0x80, 0x14, 0x01, 0x00, data=payload, le=256)
+    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False, key_size_bits: int = 2048) -> bytes:
+        payload = raw_hash if is_ecdsa else pad_pkcs1_v15_sha256(raw_hash, key_size_bits)
+
+        # CLA=80, INS=14, P1=01, P2=00, Data=payload, Le=key size
+        apdu = build_apdu(0x80, 0x14, 0x01, 0x00, data=payload, le=256 if is_ecdsa else key_size_bits // 8)
         resp = self.conn.transmit(apdu)
         if resp[-2:] != b'\x90\x00':
             raise Exception(f'ASEPCOS signature failed: {resp[-2:].hex().upper()}')
@@ -291,19 +312,19 @@ class IasEccDriver(BaseCardDriver):
         if resp[-2:] != b'\x90\x00':
             raise Exception(f'IAS-ECC MSE failed: {resp[-2:].hex().upper()}')
 
-    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False) -> bytes:
-        payload = raw_hash if is_ecdsa else pad_pkcs1_v15_sha256(raw_hash)
+    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False, key_size_bits: int = 2048) -> bytes:
+        payload = raw_hash if is_ecdsa else pad_pkcs1_v15_sha256(raw_hash, key_size_bits)
 
-        # Step 1: Send the hash
-        step1_data = bytes([0x90, len(payload) & 0xFF]) + payload
+        # Step 1: Send the hash (BER length handles the >255 byte RSA payloads)
+        step1_data = ber_tlv(0x90, payload)
         apdu1 = build_apdu(0x00, 0x2A, 0x90, 0xA0, data=step1_data)
-        
+
         resp1 = self.conn.transmit(apdu1)
         if resp1[-2:] != b'\x90\x00':
             raise Exception('IAS-ECC signature preparation failed')
 
         # Step 2: Compute
-        apdu2 = build_apdu(0x00, 0x2A, 0x9E, 0x9A, le=256)
+        apdu2 = build_apdu(0x00, 0x2A, 0x9E, 0x9A, le=256 if is_ecdsa else key_size_bits // 8)
         resp2 = self.conn.transmit(apdu2)
         if resp2[-2:] != b'\x90\x00':
             raise Exception(f'IAS-ECC computation failed: {resp2[-2:].hex().upper()}')
@@ -326,17 +347,17 @@ class ScHsmDriver(BaseCardDriver):
         # Handled dynamically inside compute_signature
         self.active_key_id = key_id
 
-    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False) -> bytes:
-        payload = raw_hash if is_ecdsa else pad_pkcs1_v15_sha256(raw_hash)
-        
-        # CLA=80, INS=68, P1=key_id, P2=algorithm, Data=payload, Le=256
+    def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False, key_size_bits: int = 2048) -> bytes:
+        payload = raw_hash if is_ecdsa else pad_pkcs1_v15_sha256(raw_hash, key_size_bits)
+
+        # CLA=80, INS=68, P1=key_id, P2=algorithm, Data=payload, Le=key size
         key_id = getattr(self, 'active_key_id', 0x01)
-        
+
         # SC-HSM uses P2 as the algorithm descriptor.
         # 0x01 for RSA PKCS#1.5. For ECDSA, it uses 0x08.
         algo_id = 0x08 if is_ecdsa else 0x01
-        
-        apdu = build_apdu(0x80, 0x68, key_id, algo_id, data=payload, le=256)
+
+        apdu = build_apdu(0x80, 0x68, key_id, algo_id, data=payload, le=256 if is_ecdsa else key_size_bits // 8)
         
         resp = self.conn.transmit(apdu)
         if resp[-2:] != b'\x90\x00':

@@ -26,8 +26,11 @@ class TestMSCAPI(unittest.TestCase):
         self.mock_crypt32.CertFreeCertificateContext = self.state.cb_CertFreeCertificateContext
         self.mock_crypt32.CertCloseStore = self.state.cb_CertCloseStore
         self.mock_crypt32.CryptAcquireCertificatePrivateKey = self.state.cb_CryptAcquireCertificatePrivateKey
-        self.mock_crypt32.CryptReleaseContext = self.state.cb_CryptReleaseContext
-        
+
+        # Build the fake advapi32.dll (CryptReleaseContext lives here, not in crypt32)
+        self.mock_advapi32 = DummyWindowsLibrary()
+        self.mock_advapi32.CryptReleaseContext = self.state.cb_CryptReleaseContext
+
         # Build the fake ncrypt.dll
         self.mock_ncrypt = DummyWindowsLibrary()
         self.mock_ncrypt.NCryptSetProperty = self.state.cb_NCryptSetProperty
@@ -37,14 +40,17 @@ class TestMSCAPI(unittest.TestCase):
         # Inject them into mscapi
         self.crypt32_patcher = patch('src.mscapi.crypt32', self.mock_crypt32, create=True)
         self.ncrypt_patcher = patch('src.mscapi.ncrypt', self.mock_ncrypt, create=True)
+        self.advapi32_patcher = patch('src.mscapi.advapi32', self.mock_advapi32, create=True)
 
         self.crypt32_patcher.start()
         self.ncrypt_patcher.start()
+        self.advapi32_patcher.start()
 
     def tearDown(self):
         self.is_windows_patcher.stop()
         self.crypt32_patcher.stop()
         self.ncrypt_patcher.stop()
+        self.advapi32_patcher.stop()
 
 
     def test_get_windows_certificates_success(self):

@@ -90,6 +90,23 @@ def read_binary_file(card_connection, file_id: bytes) -> bytes:
     return bytes(cert_data)
 
 
+def ber_tlv(tag: int, value: bytes) -> bytes:
+    '''
+    Encodes a BER-TLV data object with the standard ISO 7816-4 length forms.
+    Needed because template payloads can exceed 127 bytes (e.g. a padded
+    RSA signature input is 256 or 384 bytes).
+    '''
+
+    n = len(value)
+    if n < 0x80:
+        length = bytes([n])
+    elif n <= 0xFF:
+        length = bytes([0x81, n])
+    else:
+        length = bytes([0x82]) + n.to_bytes(2, 'big')
+    return bytes([tag]) + length + value
+
+
 def build_apdu(cla: int, ins: int, p1: int, p2: int, data: bytes = b'', le: int = None) -> bytes:
     '''
     Safely builds an ISO-7816 APDU.

@@ -120,7 +120,7 @@ def parse_prkdf(prkdf_bytes: bytes) -> list[dict]:
                     'auth_id': auth_id
                 })
         except Exception as e:
-            # Silently skip malformed records, just like OpenSC
+            # Silently skip malformed records
             continue
             
     return keys

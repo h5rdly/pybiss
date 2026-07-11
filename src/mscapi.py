@@ -7,6 +7,10 @@ if (IS_WINDOWS := sys.platform == 'win32'):
     from ctypes import wintypes, GetLastError
     crypt32 = ctypes.windll.crypt32
     ncrypt = ctypes.windll.ncrypt
+    advapi32 = ctypes.windll.advapi32
+
+    advapi32.CryptReleaseContext.restype = wintypes.BOOL
+    advapi32.CryptReleaseContext.argtypes = [c_void_p, wintypes.DWORD]
     
     # Set proper 64-bit pointer return types and argument types to prevent truncation crashes
     crypt32.CertOpenStore.restype = c_void_p
@@ -135,7 +139,7 @@ def sign_payload_windows(cert_ctx_pointer, payload: bytes, pin: str = None, hash
     # dwKeySpec == 0xFFFFFFFF means it's an NCrypt (CNG) key
     if dwKeySpec.value != CERT_NCRYPT_KEY_SPEC:
         if pfCallerFreeProv.value:
-            crypt32.CryptReleaseContext(hCryptProvOrNCryptKey, 0)
+            advapi32.CryptReleaseContext(hCryptProvOrNCryptKey, 0)
         raise Exception("Legacy CSP keys are not supported. Please use a modern CNG Smart Card.")
 
     try:

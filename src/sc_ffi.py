@@ -211,7 +211,7 @@ def verify_btrust_pin(pin_string: str):
         with card.transaction():
             
             # Select the B-Trust / PKCS#15 Applet
-            # (Example AID, replace with exact B-Trust AID from OpenSC logs)
+            # (IDPrime applet AID - adjust to the AID observed on the target card)
             select_apdu = b'\x00\xA4\x04\x00\x0C\xA0\x00\x00\x00\x18\x80\x00\x00\x00\x06\x62'
             resp = card.transmit(select_apdu)
             
