@@ -6,3 +6,6 @@
 *.key
 *.pem
 *.so
+
+settings.ini
+biss_portal_traffic.jsonl

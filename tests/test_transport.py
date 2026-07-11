@@ -112,22 +112,30 @@ class TestEnsureCert(unittest.TestCase):
 
 class TestPickFreePort(unittest.TestCase):
 
+    @staticmethod
+    def _find_free_port():
+        ''' Bind port 0 to learn a currently-free port, then release it '''
+        
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.bind(('127.0.0.1', 0))
+            return probe.getsockname()[1]
+
     def test_skips_occupied_port(self):
-        # Occupy the first BISS port, expect the picker to move on
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(('127.0.0.1', 0))
-            taken = s.getsockname()[1]
-            s.listen()
-            free = transport.pick_free_port([taken, taken + 1])
-            self.assertEqual(free, taken + 1)
+        # Genuinely occupy one port; offer a genuinely-free one second
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+            occupied.bind(('127.0.0.1', 0))
+            occupied.listen()
+            taken = occupied.getsockname()[1]
+            free = self._find_free_port()  # released, so pickable
+            if free == taken:
+                self.skipTest('port collision, rerun')
+            self.assertEqual(transport.pick_free_port([taken, free]), free)
 
     def test_raises_when_none_free(self):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            s.bind(('127.0.0.1', 0))
-            taken = s.getsockname()[1]
-            s.listen()
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+            occupied.bind(('127.0.0.1', 0))
+            occupied.listen()
+            taken = occupied.getsockname()[1]
             with self.assertRaises(OSError):
                 transport.pick_free_port([taken])
 
@@ -140,7 +148,7 @@ class TestTrustInstructions(unittest.TestCase):
         self.assertTrue(any('/tmp/localhost.pem' in ' '.join(c) for c in cmds))
 
 
-    @unittest.skipIf(sys.platform in ('win32', 'darwin'), 'Linux distro routing')
+    @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux distro routing')
     def test_linux_dir_and_command_match_same_distro(self):
         ''' The anchor directory and its update command must belong to the SAME distro family '''
 

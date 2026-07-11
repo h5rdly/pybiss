@@ -214,7 +214,13 @@ def pick_free_port(ports: list = None, host: str = '127.0.0.1') -> int:
 
     for port in (ports or BISS_PORTS):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            if sys.platform == 'win32':
+                # On Windows, SO_EXCLUSIVEADDRUSE gives the honest answer
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            else:
+                # POSIX: only permits rebinding TIME_WAIT ports (server restarts),
+                # not actively bound ones - safe for probing.
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 s.bind((host, port))
                 return port
@@ -237,6 +243,10 @@ def trust_instructions(cert_path: str) -> list:
     elif sys.platform == 'darwin':
         return [['security', 'add-trusted-cert', '-d', '-r', 'trustRoot',
                  '-k', os.path.expanduser('~/Library/Keychains/login.keychain-db'), cert_path]]
+    elif sys.platform.startswith('freebsd'):
+        # FreeBSD: certctl (base system since 12.2) manages the trust store
+        dest = '/usr/local/etc/ssl/certs/pybiss-localhost.crt'
+        return [['sudo', 'cp', cert_path, dest], ['sudo', 'certctl', 'rehash']]
 
     linux_stores = [
         ('/usr/local/share/ca-certificates', ['update-ca-certificates']),        # Debian / Ubuntu
