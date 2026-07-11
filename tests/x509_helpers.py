@@ -98,6 +98,18 @@ def build_cert(n: int = TEST_N, e: int = TEST_E, cn: str = 'Test', aki: str = No
     return seq(tbs, rsa_alg, bitstring(b'\x00'))
 
 
+def build_test_chain() -> tuple[bytes, bytes, bytes]:
+    '''
+    A standard three-link chain for tests: (leaf, intermediate, root).
+    Root is self-signed (no AKI); links are tied by AKI -> SKI.
+    '''
+
+    root = build_cert(cn='Root', ski='03' * 20)
+    inter = build_cert(cn='Inter', ski='02' * 20, aki='03' * 20)
+    leaf = build_cert(cn='Leaf', ski='01' * 20, aki='02' * 20)
+    return leaf, inter, root
+
+
 # --- JWS crafting ---
 
 def b64url(data: bytes) -> str:

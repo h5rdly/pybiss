@@ -5,17 +5,13 @@ from src import detector
 
 
 class FakeEnv:
-    ''' 
-    Context manager to fake OS and FileSystem behavior natively, 
-    avoiding the need for unittest.mock.
-    '''
+    ''' Context manager to fake OS and FileSystem behavior natively '''
 
-    def __init__(self, platform='linux', existing_paths=None, connected_atrs=None, pcsc_bindings=None):
-        
+    def __init__(self, platform='linux', existing_paths=None, connected_atrs=None):
+
         self.platform = platform
         self.existing_paths = existing_paths or []
         self.connected_atrs = connected_atrs
-        self.pcsc_bindings = pcsc_bindings
 
 
     def __enter__(self):
@@ -24,28 +20,23 @@ class FakeEnv:
         self.orig_platform = sys.platform
         self.orig_exists = os.path.exists
         self.orig_get_atrs = detector.get_connected_atrs
-        self.orig_get_pcsc = detector._get_pcsc_bindings
-        
+
         # Inject fakes
         sys.platform = self.platform
-        
+
         # A simple fake filesystem check: if the path we injected is in the requested path, it "exists"
         os.path.exists = lambda path: any(fake_path in path for fake_path in self.existing_paths)
-        
+
         if self.connected_atrs is not None:
             detector.get_connected_atrs = lambda: self.connected_atrs
-            
-        if self.pcsc_bindings is not None:
-            detector._get_pcsc_bindings = lambda: self.pcsc_bindings
 
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        
+
         # Restore everything so tests don't pollute each other
         sys.platform = self.orig_platform
         os.path.exists = self.orig_exists
         detector.get_connected_atrs = self.orig_get_atrs
-        detector._get_pcsc_bindings = self.orig_get_pcsc
 
 
 class TestDetector(unittest.TestCase):
@@ -128,12 +119,35 @@ class TestDetector(unittest.TestCase):
 
 
     def test_get_connected_atrs_no_pcsc(self):
+        ''' get_connected_atrs returns [] if PC/SC is missing or its service is down '''
 
-        ''' Tests that get_connected_atrs fails gracefully if PC/SC isn't installed on the OS '''
-        
-        with FakeEnv(pcsc_bindings=(None, None, None, False)):
-            atrs = detector.get_connected_atrs()
-            self.assertEqual(atrs, [])
+        # Patch the exact sc_ffi object detector holds (avoids dual-module ambiguity)
+        sc_ffi = detector.sc_ffi
+        orig = sc_ffi.establish_context
+        # Simulate a machine with no running pcscd / no PC/SC library
+        sc_ffi.establish_context = lambda: (_ for _ in ()).throw(Exception('SCARD_E_NO_SERVICE'))
+        try:
+            self.assertEqual(detector.get_connected_atrs(), [])
+        finally:
+            sc_ffi.establish_context = orig
+
+    def test_get_connected_atrs_reads_atr_via_sc_ffi(self):
+        ''' Detection drives the shared sc_ffi layer and upper-cases the ATR hex '''
+
+        sc_ffi = detector.sc_ffi
+        saved = (sc_ffi.establish_context, sc_ffi.list_readers, sc_ffi.connect_card,
+                 sc_ffi.get_atr, sc_ffi.disconnect_card, sc_ffi.release_context)
+        sc_ffi.establish_context = lambda: 'CTX'
+        sc_ffi.list_readers = lambda ctx: ['Reader 0']
+        sc_ffi.connect_card = lambda ctx, r: ('CARD', 1)
+        sc_ffi.get_atr = lambda card: bytes.fromhex('3b7f')
+        sc_ffi.disconnect_card = lambda card: None
+        sc_ffi.release_context = lambda ctx: None
+        try:
+            self.assertEqual(detector.get_connected_atrs(), ['3B7F'])
+        finally:
+            (sc_ffi.establish_context, sc_ffi.list_readers, sc_ffi.connect_card,
+             sc_ffi.get_atr, sc_ffi.disconnect_card, sc_ffi.release_context) = saved
 
 
 if __name__ == '__main__':

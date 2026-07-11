@@ -1,3 +1,4 @@
+import base64
 from datetime import datetime, timezone
 
 class DerReader:
@@ -210,6 +211,22 @@ def parse_certificate(der_bytes: bytes) -> dict:
         'key_usages': usages, 'aki': aki, 'ski': ski, 'n': n, 'e': e,
         'key_type': key_type, 'extensions': extensions,
     }
+
+
+def pem_to_der(blob: bytes) -> list[bytes]:
+    ''' Extract every certificate from a PEM blob. Handles multi-cert bundles '''
+
+    if b'-----BEGIN CERTIFICATE-----' not in blob:
+        return [blob]
+
+    ders = []
+    for chunk in blob.split(b'-----BEGIN CERTIFICATE-----')[1:]:
+        body = chunk.split(b'-----END CERTIFICATE-----')[0]
+        try:
+            ders.append(base64.b64decode(b''.join(body.split()), validate=True))
+        except Exception:
+            continue
+    return ders
 
 
 def get_x509_subject(der_bytes: bytes) -> str:

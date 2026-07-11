@@ -9,7 +9,7 @@ from tkinter_mods import (
 )
 
 from config import config
-from locale import _
+from i18n import _
 from app import app as api_server
 
 # The core engine
@@ -100,7 +100,7 @@ class DesktopDashboard(Window):
             ('home', f'🏠  {_("dash_title").split()[0]}'), # Grabs just the first word for compactness
             ('logs', f'📄  {_("tray_log_file")}'), 
             ('admin', '🛠️  Administration'),
-            ('settings', '⚙️  Settings') # Hardcoded for now, or add to locale.py
+            ('settings', '⚙️  Settings') # Hardcoded for now, or add to i18n.py
         ]
         
         for view_id, text in nav_items:

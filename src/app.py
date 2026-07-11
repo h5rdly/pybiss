@@ -1,22 +1,41 @@
-import base64, sys
+import base64, functools, os, sys
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
+sys.path.insert(0, __file__.replace('\\', '/').rsplit('/', 1)[0])
 
-import detector as detector
-import hardware as hardware
-import service as service
-import jws as jws
+import detector, hardware, service, jws, transport 
 
+from cert_parser import pem_to_der
 from config import config
-from server import MiniServer
+from i18n import reason
+from pkcs11_types import CKO_PRIVATE_KEY, CKO_PUBLIC_KEY, CKO_CERTIFICATE
+from server import MiniServer, CORS
 from ui_bridge import get_ui_provider
 
-from pkcs11_types import CKO_PRIVATE_KEY, CKO_PUBLIC_KEY, CKO_CERTIFICATE
 
 
 # -- Endpoints 
 
 app = MiniServer()
+# Match the daemon's open CORS (origin '*', no credentials); jwsData is the gate.
+CORS(app)
+
+
+def jws_gated(admin_required: bool = False):
+    '''
+    Verifies the request's jwsData before the handler run. The verified JWS payload is
+    passed to the handler as its second argument.
+    '''
+
+    def decorator(handler):
+        @functools.wraps(handler)
+        def gated(req):
+            try:
+                payload = jws.verify(req.json.get('jwsData', ''), admin_required=admin_required)
+            except jws.JwsError as e:
+                return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
+            return handler(req, payload)
+        return gated
+    return decorator
 
 
 @app.get('/version')
@@ -46,12 +65,8 @@ def close_daemon(req):
 
 
 @app.post('/getSerialNumber')
-def get_serial_number(req):
-
-    try:
-        jws.verify(req.json.get('jwsData', ''))
-    except jws.JwsError as e:
-        return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
+@jws_gated()
+def get_serial_number(req, payload):
 
     lib_path = detector.auto_detect_library()
     if not lib_path:
@@ -74,12 +89,8 @@ def get_serial_number(req):
 
 
 @app.post('/setPIN')
-def set_pin(req):
-
-    try:
-        jws.verify(req.json.get('jwsData', ''))
-    except jws.JwsError as e:
-        return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
+@jws_gated()
+def set_pin(req, payload):
 
     # The PINs are never part of the request - the daemon prompts locally
     ui_provider = get_ui_provider()
@@ -99,12 +110,8 @@ def set_pin(req):
 
 
 @app.post('/setPUK')
-def set_puk(req):
-
-    try:
-        jws.verify(req.json.get('jwsData', ''))
-    except jws.JwsError as e:
-        return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
+@jws_gated()
+def set_puk(req, payload):
 
     ui_provider = get_ui_provider()
     old_puk = ui_provider.prompt_pin(label='current PUK')
@@ -123,13 +130,8 @@ def set_puk(req):
 
 
 @app.post('/unblockPIN')
-def unblock_pin(req):
-
-    try:
-        # Unblocking requires the administrative authorization level
-        jws.verify(req.json.get('jwsData', ''), admin_required=True)
-    except jws.JwsError as e:
-        return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
+@jws_gated(admin_required=True)  # unblocking needs the administrative level
+def unblock_pin(req, payload):
 
     ui_provider = get_ui_provider()
     puk = ui_provider.prompt_pin(label='PUK')
@@ -147,155 +149,262 @@ def unblock_pin(req):
         return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
 
 
-def _not_implemented(req):
-    return {'status': 'error', 'reasonCode': 501, 'reasonText': 'Not implemented in pybiss yet'}
-
-# Endpoints the official daemon exposes that pybiss does not support yet.
-# Registered so portals get a proper BISS error envelope instead of a 404.
-for _path in ('/chainFound', '/genSPKAC', '/generatePfx', '/getPfxKeyPair', '/setNewPUKNewPIN', '/v2/renew'):
-    app.post(_path)(_not_implemented)
+CERTS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'certs')
 
 
-@app.post('/writeCertSC')
-def write_cert_sc(req):
+@app.post('/chainFound')
+def chain_found(req):
+    ''' Reports whether a full certificate chain exists for a key identifier '''
 
-    data = req.json
-    cert_b64 = data.get('certificate')
-    
-    if not cert_b64:
-        return {'status': 'error', 'reasonCode': 400, 'reasonText': 'Missing certificate data'}
+    key_identifier = (req.json.get('keyIdentifier') or '').strip()
+    if not key_identifier:
+        return {'chainFound': False, 'status': 'error', 'reasonCode': 400,
+                'reasonText': reason('error.request.mandatory-params')}
+
+    found = service.chain_exists_for_key_identifier(
+        key_identifier, service.load_ca_certificates(CERTS_DIR)
+    )
+    return {'chainFound': found, 'status': 'ok', 'reasonCode': 200,
+            'reasonText': reason('response.success')}
+
+
+@app.post('/genSPKAC')
+@jws_gated()
+def gen_spkac(req, payload):
+    '''
+    Generates a fresh key pair on the card and returns a signed renewal request.
+
+    NOTE: returns an SPKAC structure under pkcs10Data; the official daemon
+    appears to return a PKCS#10 CSR. To be settled against a captured portal
+    request before renewal flows are relied on.
+    '''
+
+    try:
+        key_size = int(payload.get('keySize') or 2048)
+    except (TypeError, ValueError):
+        return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.request.bad-type')}
+
+    key_id = (payload.get('serialNum') or 'btrust-renewal').encode('utf-8')[:16]
 
     ui_provider = get_ui_provider()
     pin = ui_provider.prompt_pin()
     if not pin:
-        return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
+        return {'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
+
+    lib_path = detector.auto_detect_library()
+    if not lib_path:
+        return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.no-card-found')}
+
+    try:
+        funcs = hardware.load_pkcs11(lib_path)
+        slots = hardware.get_slots(funcs, token_present=True)
+        if not slots:
+            return {'status': 'error', 'reasonCode': 404, 'reasonText': reason('error.token-not-found')}
+
+        spkac_b64 = hardware.generate_spkac(funcs, slots[0], pin, key_id, challenge='',
+                                            key_size_bits=key_size)
+        return {'pkcs10Data': spkac_b64, 'status': 'ok', 'reasonCode': 200,
+                'reasonText': reason('response.success')}
+    except Exception as e:
+        return {'status': 'error', 'reasonCode': 500,
+                'reasonText': f"{reason('error.pkcs10.create-failed')}: {e}"}
+
+
+def _not_implemented(req):
+    return {'status': 'error', 'reasonCode': 501, 'reasonText': 'Not implemented in pybiss yet'}
+
+# Endpoints the official daemon exposes that pybiss does not support yet:
+#   setNewPUKNewPIN - resets PIN/PUK from factory defaults to server-chosen
+#     random values RSA-encrypted back to the CA; only meaningful at issuance.
+#   generatePfx / getPfxKeyPair - PKCS#12 needs symmetric crypto (AES/3DES)
+#     absent from the standard library.
+#   v2/renew - newer renew variant, not yet reverse-engineered.
+for _path in ('/generatePfx', '/getPfxKeyPair', '/setNewPUKNewPIN', '/v2/renew'):
+    app.post(_path)(_not_implemented)
+
+
+@app.post('/writeCertSC')
+@jws_gated()
+def write_cert_sc(req, payload):
+
+    # Real field is pemData (PEM or base64 DER); accept 'certificate' for own clients
+    cert_blob = payload.get('pemData') or payload.get('certificate')
+    if not cert_blob:
+        return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.request.mandatory-params')}
+
+    try:
+        ders = pem_to_der(cert_blob.encode('utf-8') if isinstance(cert_blob, str) else cert_blob)
+        cert_der = ders[0] if ders and b'-----BEGIN' in (cert_blob.encode() if isinstance(cert_blob, str) else cert_blob) \
+            else base64.b64decode(cert_blob)
+    except Exception:
+        return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.request.certificate-not-valid')}
+
+    ui_provider = get_ui_provider()
+    pin = ui_provider.prompt_pin()
+    if not pin:
+        return {'confirm': None, 'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
 
     lib_path = detector.auto_detect_library()
     try:
-        cert_der = base64.b64decode(cert_b64)
         funcs = hardware.load_pkcs11(lib_path)
         slots = hardware.get_slots(funcs, token_present=True)
-        
         hardware.write_certificate(funcs, slots[0], pin, cert_der)
-        return {'status': 'ok', 'reasonCode': 200, 'reasonText': 'Certificate successfully written to card'}
+        return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success')}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
 
 
 @app.post('/getInfo')
-def get_info(req):
-    ''' Diagnostics: Returns full hardware spec sheet '''
+@jws_gated()
+def get_info(req, payload):
+    ''' Full token spec sheet, in the daemon's flat response shape '''
 
     lib_path = detector.auto_detect_library()
-    if not lib_path: return {'status': 'error', 'reasonCode': 400, 'reasonText': 'No smart card detected'}
-    
+    if not lib_path:
+        return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.no-card-found')}
+
     try:
         funcs = hardware.load_pkcs11(lib_path)
         slots = hardware.get_slots(funcs, token_present=True)
-        if not slots: return {'status': 'error', 'reasonCode': 404, 'reasonText': 'No token present'}
-        
+        if not slots:
+            return {'status': 'error', 'reasonCode': 404, 'reasonText': reason('error.token-not-found')}
+
         info = hardware.get_token_info_extended(funcs, slots[0])
-        return {'info': info, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
+        provider = next((p for p in map(detector.identify_provider, detector.get_connected_atrs()) if p), '')
+        # Flatten to the official C0030ai field names
+        return {
+            'tokenLabel': info.get('label', ''),
+            'cardSerialNumber': info.get('serialNumber', ''),
+            'manufacturerId': info.get('manufacturerID', ''),
+            'model': info.get('model', ''),
+            'producer': provider,
+            'freePublicMemory': str(info.get('ulFreePublicMemory', '')),
+            'totalPublicMemory': str(info.get('ulTotalPublicMemory', '')),
+            'freePrivateMemory': str(info.get('ulFreePrivateMemory', '')),
+            'totalPrivateMemory': str(info.get('ulTotalPrivateMemory', '')),
+            'cardData': [],
+            'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success'),
+        }
     except Exception as e:
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
 
 
 @app.post('/genRSAPair')
-def gen_rsa_pair(req):
+@jws_gated()
+def gen_rsa_pair(req, payload):
 
-    data = req.json
-    label = data.get('label', 'B-Trust Generated Key')
-    key_id = data.get('keyId', '').encode('utf-8')
-    
+    label = payload.get('label', 'B-Trust Generated Key')
+    key_id = (payload.get('serNum') or payload.get('keyId') or 'btrust-key').encode('utf-8')[:16]
+    try:
+        key_size = int(payload.get('keySize') or 2048)
+    except (TypeError, ValueError):
+        return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.request.bad-type')}
+
     ui_provider = get_ui_provider()
     pin = ui_provider.prompt_pin()
-    if not pin: return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
+    if not pin:
+        return {'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
 
     lib_path = detector.auto_detect_library()
     try:
         funcs = hardware.load_pkcs11(lib_path)
         slots = hardware.get_slots(funcs, token_present=True)
-        
-        hardware.generate_rsa_keypair(funcs, slots[0], pin, label=label, key_id=key_id)
-        return {'status': 'ok', 'reasonCode': 200, 'reasonText': 'RSA Keypair Generated'}
+        hardware.generate_rsa_keypair(funcs, slots[0], pin, label=label, key_id=key_id,
+                                      key_size_bits=key_size)
+        return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success')}
     except Exception as e:
-        return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
+        return {'status': 'error', 'reasonCode': 500,
+                'reasonText': f"{reason('error.keypair.gen-failed')}: {e}"}
 
 
 @app.post('/renew')
-def renew_cert(req):
-    ''' Generates the SPKAC payload required for certificate renewal on B-Trust portals '''
-    
-    data = req.json
-    key_id = data.get('keyId', 'RENEWAL').encode('utf-8')
-    challenge = data.get('challenge', '1234')
-    
+@jws_gated()
+def renew_cert(req, payload):
+    '''
+    Generates a fresh key pair + renewal request for B-Trust portals.
+
+    PARTIAL: the official renew response (C0044aw) also returns pkcs7Data,
+    keyPairData and keyPairModule; this returns only the PKCS#10/SPKAC under
+    pkcs10Data. To be completed against a captured portal request.
+    '''
+
+    try:
+        key_size = int(payload.get('keySize') or 2048)
+    except (TypeError, ValueError):
+        return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.request.bad-type')}
+    key_id = (payload.get('serNum') or payload.get('keyId') or 'RENEWAL').encode('utf-8')[:16]
+
     ui_provider = get_ui_provider()
     pin = ui_provider.prompt_pin()
-    if not pin: return {'spkac': None, 'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
+    if not pin:
+        return {'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
 
     lib_path = detector.auto_detect_library()
     try:
         funcs = hardware.load_pkcs11(lib_path)
         slots = hardware.get_slots(funcs, token_present=True)
-        
-        spkac_b64 = hardware.generate_spkac(funcs, slots[0], pin, key_id, challenge)
-        return {'spkac': spkac_b64, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
+        spkac_b64 = hardware.generate_spkac(funcs, slots[0], pin, key_id, challenge='',
+                                            key_size_bits=key_size)
+        return {'pkcs10Data': spkac_b64, 'status': 'ok', 'reasonCode': 200,
+                'reasonText': reason('response.success')}
     except Exception as e:
-        return {'spkac': None, 'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
+        return {'status': 'error', 'reasonCode': 500,
+                'reasonText': f"{reason('error.pkcs10.create-failed')}: {e}"}
 
 
+# NOTE: the exact inner field name for the delete target (label vs id) should
+# be confirmed against a captured portal request; 'label' is our own convention.
 @app.post('/delRSAPair')
-def del_rsa_pair(req):
+@jws_gated()
+def del_rsa_pair(req, payload):
 
-    data = req.json
-    label = data.get('label')
-    if not label: 
-        return {'status': 'error', 'reasonCode': 400, 'reasonText': 'Missing key label'}
+    label = payload.get('label')
+    if not label:
+        return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.request.mandatory-params')}
 
     ui_provider = get_ui_provider()
     pin = ui_provider.prompt_pin()
-    if not pin: 
-        return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
+    if not pin:
+        return {'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
 
     lib_path = detector.auto_detect_library()
     try:
         funcs = hardware.load_pkcs11(lib_path)
         slots = hardware.get_slots(funcs, token_present=True)
-        
+
         # Must attempt to delete both the Private and Public key objects
         priv_deleted = hardware.delete_object_by_label(funcs, slots[0], pin, CKO_PRIVATE_KEY, label)
         pub_deleted = hardware.delete_object_by_label(funcs, slots[0], pin, CKO_PUBLIC_KEY, label)
-        
+
         if priv_deleted or pub_deleted:
-            return {'status': 'ok', 'reasonCode': 200, 'reasonText': 'Keypair deleted'}
-        else:
-            return {'status': 'error', 'reasonCode': 404, 'reasonText': 'Keypair not found'}
+            return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success')}
+        return {'status': 'error', 'reasonCode': 404, 'reasonText': reason('error.keypair.not-found')}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
 
 
 @app.post('/delCert')
-def del_cert(req):
+@jws_gated()
+def del_cert(req, payload):
 
-    data = req.json
-    label = data.get('label')
-    if not label: return {'status': 'error', 'reasonCode': 400, 'reasonText': 'Missing cert label'}
+    label = payload.get('label')
+    if not label:
+        return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.request.mandatory-params')}
 
     ui_provider = get_ui_provider()
     pin = ui_provider.prompt_pin()
-    if not pin: return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
+    if not pin:
+        return {'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
 
     lib_path = detector.auto_detect_library()
     try:
         funcs = hardware.load_pkcs11(lib_path)
         slots = hardware.get_slots(funcs, token_present=True)
-        
+
         cert_deleted = hardware.delete_object_by_label(funcs, slots[0], pin, CKO_CERTIFICATE, label)
         if cert_deleted:
-            return {'status': 'ok', 'reasonCode': 200, 'reasonText': 'Certificate deleted'}
-        else:
-            return {'status': 'error', 'reasonCode': 404, 'reasonText': 'Certificate not found'}
+            return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success')}
+        return {'status': 'error', 'reasonCode': 404, 'reasonText': reason('error.no-certs-found')}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
 
@@ -536,8 +645,26 @@ def sign(req):
         return {'signatures': generated_signatures, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
 
 
+def serve(https: bool = True):
+    '''
+    HTTPS on the first free BISS port (53952-55), using a self-signed localhost cert that
+    is minted on first run.
+    '''
+
+    if not https:
+        print('Starting pybiss in plain-HTTP mode on 127.0.0.1:4843 (dev / own clients).')
+        app.run(host='127.0.0.1', port=4843)
+        return
+
+    port = transport.pick_free_port()
+    certfile, keyfile = transport.ensure_localhost_cert(CERTS_DIR)
+    print(f'Serving HTTPS on the BISS port {port}. If the browser rejects the '
+          'certificate, run transport.install_trust_anchor() to trust it.')
+    app.run(host='127.0.0.1', port=port, use_ssl=True, certfile=certfile, keyfile=keyfile)
+
+
 if __name__ == '__main__':
 
-    # Runs the server headlessly via CLI
-    # For the full Desktop GUI, run src/dashboard.py instead
-    app.run(host='127.0.0.1', port=4843)
+    # Runs the server headlessly via CLI (BISS-compatible HTTPS).
+    # For the full Desktop GUI, run src/dashboard.py instead.
+    serve(https='--http' not in sys.argv)

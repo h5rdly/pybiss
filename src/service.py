@@ -1,8 +1,8 @@
-import sys, time, hashlib
+import os, sys, time, hashlib
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from cert_parser import get_x509_metadata, get_x509_subject, get_rsa_public_key
+from cert_parser import get_x509_metadata, get_x509_subject, get_rsa_public_key, pem_to_der
 from verifier import verify_rsa_pkcs1_v1_5
 
 
@@ -58,40 +58,91 @@ def filter_certificates(certs: list[dict], selector: dict = None, show_valid_cer
     return filtered
 
 
-def build_certificate_chain(leaf_der: bytes, candidates: list[bytes]) -> list[bytes]:
+def _is_self_signed(meta: dict) -> bool:
+    ''' Root certificates carry no AKI, or an AKI equal to their own SKI '''
+
+    return not meta.get('aki') or meta.get('aki') == meta.get('ski')
+
+
+def _parse_candidates(candidates: list[bytes]) -> list[tuple[bytes, dict]]:
+    ''' Parses each candidate DER once, silently skipping malformed ones '''
+
+    parsed = []
+    for der in candidates:
+        try:
+            parsed.append((der, get_x509_metadata(der)))
+        except Exception:
+            continue
+    return parsed
+
+
+def _walk_chain(leaf_der: bytes, leaf_meta: dict, parsed: list) -> tuple[list[bytes], dict]:
     '''
-    Orders certificates leaf -> intermediate(s) -> root by matching each
-    certificate's AKI to the issuer's SKI. Candidates that don't belong to
-    the chain are ignored; a missing link just ends the chain early.
+    Walks leaf -> intermediate(s) -> root by matching each certificate's AKI
+    to the issuer's SKI
     '''
 
     chain = [leaf_der]
-    current = get_x509_metadata(leaf_der)
+    current = leaf_meta
 
-    while len(chain) < 8:
+    while len(chain) < 8 and not _is_self_signed(current):
         aki = current.get('aki', '')
-        # Self-signed root (no AKI, or AKI == own SKI): chain is complete
-        if not aki or aki == current.get('ski', ''):
-            break
-
-        parent = None
-        for der in candidates:
-            if any(der == c for c in chain):
-                continue
-            try:
-                meta = get_x509_metadata(der)
-            except Exception:
-                continue
-            if meta.get('ski', '') == aki:
-                parent = (der, meta)
-                break
-
+        parent = next(
+            ((der, meta) for der, meta in parsed
+             if meta.get('ski', '') == aki and der not in chain),
+            None,
+        )
         if not parent:
             break
         chain.append(parent[0])
         current = parent[1]
 
-    return chain
+    return chain, current
+
+
+def build_certificate_chain(leaf_der: bytes, candidates: list[bytes]) -> list[bytes]:
+    ''' Orders certificates leaf -> intermediate(s) -> root '''
+
+    return _walk_chain(leaf_der, get_x509_metadata(leaf_der), _parse_candidates(candidates))[0]
+
+
+def chain_exists_for_key_identifier(key_identifier: str, candidates: list[bytes]) -> bool:
+    '''
+    Check if a complete certificate chain (leaf -> self-signed root) can be
+    assembled for the certificate whose SKI matches key_identifier, using the
+    given candidate certificates
+    '''
+
+    if not key_identifier:
+        return False
+    target = key_identifier.upper()
+
+    parsed = _parse_candidates(candidates)
+    leaf = next(((der, meta) for der, meta in parsed
+                 if meta.get('ski', '').upper() == target), None)
+    if leaf is None:
+        return False
+
+    _, tail = _walk_chain(leaf[0], leaf[1], parsed)
+    return _is_self_signed(tail)
+
+
+def load_ca_certificates(certs_dir: str) -> list[bytes]:
+    ''' DER of every certificate found under certs_dir (PEM bundles included) '''
+
+    if not os.path.isdir(certs_dir):
+        return []
+
+    ders = []
+    for name in sorted(os.listdir(certs_dir)):
+        if not name.lower().endswith(('.pem', '.crt', '.cer', '.der')):
+            continue
+        try:
+            with open(os.path.join(certs_dir, name), 'rb') as f:
+                ders.extend(pem_to_der(f.read()))
+        except Exception:
+            continue
+    return ders
 
 
 def verify_server_signature(payload: bytes, signature: bytes, server_cert_der: bytes, hash_alg: str) -> bool:

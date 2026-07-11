@@ -3,8 +3,9 @@ import sys, unittest
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
 from src import jws
-from src.service import build_certificate_chain
-from tests.x509_helpers import build_cert, make_jws
+from src.service import build_certificate_chain, chain_exists_for_key_identifier
+from tests.x509_helpers import build_cert, build_test_chain, make_jws
+
 
 PROD_ACA = '07DCAA307698B7854B6D0318C8E3CDA77B3682EF'
 
@@ -95,9 +96,7 @@ class TestJwsVerify(unittest.TestCase):
 class TestBuildCertificateChain(unittest.TestCase):
 
     def setUp(self):
-        self.root = build_cert(cn='Root', ski='03' * 20)                      # self-signed: no AKI
-        self.inter = build_cert(cn='Inter', ski='02' * 20, aki='03' * 20)
-        self.leaf = build_cert(cn='Leaf', ski='01' * 20, aki='02' * 20)
+        self.leaf, self.inter, self.root = build_test_chain()
         self.stranger = build_cert(cn='Other', ski='09' * 20, aki='08' * 20)
 
     def test_chain_ordered_leaf_to_root(self):
@@ -113,6 +112,35 @@ class TestBuildCertificateChain(unittest.TestCase):
         lone = build_cert(cn='Lone', ski='05' * 20, aki='05' * 20)
         chain = build_certificate_chain(lone, [self.root, self.inter])
         self.assertEqual(chain, [lone])
+
+
+class TestChainExists(unittest.TestCase):
+    ''' Backs the /chainFound endpoint '''
+
+    def setUp(self):
+        self.leaf, self.inter, self.root = build_test_chain()
+
+    def test_complete_chain_found(self):
+        ok = chain_exists_for_key_identifier('01' * 20, [self.leaf, self.inter, self.root])
+        self.assertTrue(ok)
+
+    def test_case_insensitive_key_identifier(self):
+        # Alphabetic hex so the case actually differs between query and cert
+        lone = build_cert(cn='Lower', ski='ab' * 20)
+        self.assertTrue(chain_exists_for_key_identifier('AB' * 20, [lone]))
+        self.assertTrue(chain_exists_for_key_identifier('ab' * 20, [lone]))
+
+    def test_incomplete_chain_not_found(self):
+        # Missing the root -> chain ends at a non-self-signed intermediate
+        ok = chain_exists_for_key_identifier('01' * 20, [self.leaf, self.inter])
+        self.assertFalse(ok)
+
+    def test_unknown_key_identifier_not_found(self):
+        ok = chain_exists_for_key_identifier('AB' * 20, [self.leaf, self.inter, self.root])
+        self.assertFalse(ok)
+
+    def test_empty_key_identifier_not_found(self):
+        self.assertFalse(chain_exists_for_key_identifier('', [self.leaf]))
 
 
 if __name__ == '__main__':

@@ -1,6 +1,8 @@
-import os, sys, ctypes
+import os, sys
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
+
+import sc_ffi
 
 
 #  BISS ATR Mappings 
@@ -33,100 +35,29 @@ ATR_MAPPINGS = {
     '3B8D0180FBA000000397425446590401CF': 'MICROSOFT_VMWARE',
 }
 
-# --- Pure Python PC/SC Wrapper ---
-
-DWORD = ctypes.c_uint32
-LPDWORD = ctypes.POINTER(DWORD)
-
-def _get_pcsc_bindings():
-    ''' Dynamically loads the correct native PC/SC library based on OS '''
-
-    try:
-        if sys.platform == 'win32':
-            return ctypes.windll.winscard, ctypes.c_void_p, ctypes.c_void_p, True
-        else:
-            # POSIX architectures use 32-bit integers for PCSC handles
-            ctx_type = ctypes.c_int32
-            handle_type = ctypes.c_int32
-            
-            if sys.platform == 'darwin':
-                lib = ctypes.cdll.LoadLibrary('/System/Library/Frameworks/PCSC.framework/PCSC')
-                return lib, ctx_type, handle_type, False
-            else:
-                import ctypes.util
-                lib_path = ctypes.util.find_library('pcsclite')
-                if not lib_path: return None, ctx_type, handle_type, False
-                return ctypes.cdll.LoadLibrary(lib_path), ctx_type, handle_type, False
-    except Exception:
-        return None, None, None, False
-
-
 def get_connected_atrs() -> list[str]:
-    ''' Query the OS native smart card manager and returns all active ATRs '''
-
-    pcsc, SCARDCONTEXT, SCARDHANDLE, is_win = _get_pcsc_bindings()
-    if not pcsc:
-        return []
-
-    # Map C function signatures
-    SCardEstablishContext = pcsc.SCardEstablishContext
-    SCardEstablishContext.argtypes = [DWORD, ctypes.c_void_p, ctypes.c_void_p, ctypes.POINTER(SCARDCONTEXT)]
-    
-    SCardListReaders = pcsc.SCardListReadersA if is_win else pcsc.SCardListReaders
-    SCardListReaders.argtypes = [SCARDCONTEXT, ctypes.c_char_p, ctypes.c_char_p, LPDWORD]
-    
-    SCardConnect = pcsc.SCardConnectA if is_win else pcsc.SCardConnect
-    SCardConnect.argtypes = [SCARDCONTEXT, ctypes.c_char_p, DWORD, DWORD, ctypes.POINTER(SCARDHANDLE), LPDWORD]
-    
-    SCardStatus = pcsc.SCardStatusA if is_win else pcsc.SCardStatus
-    SCardStatus.argtypes = [SCARDHANDLE, ctypes.c_char_p, LPDWORD, LPDWORD, LPDWORD, ctypes.POINTER(ctypes.c_ubyte), LPDWORD]
-    
-    SCardDisconnect = pcsc.SCardDisconnect
-    SCardDisconnect.argtypes = [SCARDHANDLE, DWORD]
-    
-    SCardReleaseContext = pcsc.SCardReleaseContext
-    SCardReleaseContext.argtypes = [SCARDCONTEXT]
+    ''' Query the OS native smart card manager and return all active card ATRs '''
 
     atrs = []
-    context = SCARDCONTEXT()
-    
-    # SCARD_SCOPE_SYSTEM = 2
-    if SCardEstablishContext(2, None, None, ctypes.byref(context)) != 0:
-        return atrs
+    try:
+        hcontext = sc_ffi.establish_context()
+    except Exception:
+        return []  # library missing, service down, or no reader subsystem
 
     try:
-        cchReaders = DWORD(0)
-        # Fetch buffer size
-        if SCardListReaders(context, None, None, ctypes.byref(cchReaders)) == 0:
-            readers_buf = ctypes.create_string_buffer(cchReaders.value)
-            # Fetch actual readers
-            if SCardListReaders(context, None, readers_buf, ctypes.byref(cchReaders)) == 0:
-                readers = [r for r in readers_buf.raw.split(b'\x00') if r]
-                
-                for reader in readers:
-                    card = SCARDHANDLE()
-                    active_proto = DWORD()
-                    # SCARD_SHARE_SHARED = 2, SCARD_PROTOCOL_T0 | T1 = 3
-                    if SCardConnect(context, reader, 2, 3, ctypes.byref(card), ctypes.byref(active_proto)) == 0:
-                        try:
-                            # Pre-allocate buffers for SCardStatus to avoid NULL pointer panics
-                            reader_name_buf = ctypes.create_string_buffer(256)
-                            reader_name_len = DWORD(256)
-                            state = DWORD()
-                            protocol = DWORD()
-                            atr_len = DWORD(33)
-                            atr_buf = (ctypes.c_ubyte * 33)()
-                            
-                            if SCardStatus(card, reader_name_buf, ctypes.byref(reader_name_len), 
-                                           ctypes.byref(state), ctypes.byref(protocol), 
-                                           atr_buf, ctypes.byref(atr_len)) == 0:
-                                atr_hex = bytes(atr_buf[:atr_len.value]).hex().upper()
-                                atrs.append(atr_hex)
-                        finally:
-                            # SCARD_LEAVE_CARD = 0
-                            SCardDisconnect(card, 0)
+        for reader in sc_ffi.list_readers(hcontext):
+            try:
+                hcard, _ = sc_ffi.connect_card(hcontext, reader)
+            except Exception:
+                continue  # reader present but empty / in use
+            try:
+                atrs.append(sc_ffi.get_atr(hcard).hex().upper())
+            except Exception:
+                pass
+            finally:
+                sc_ffi.disconnect_card(hcard)
     finally:
-        SCardReleaseContext(context)
+        sc_ffi.release_context(hcontext)
 
     return atrs
 

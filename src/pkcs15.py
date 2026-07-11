@@ -126,9 +126,56 @@ def parse_prkdf(prkdf_bytes: bytes) -> list[dict]:
     return keys
 
 
+def _parse_pin_attributes(pa_val: bytes) -> dict:
+    '''
+    Parse a PKCS#15 PinAttributes SEQUENCE into the parameters needed to
+    build a correct VERIFY APDU:
+
+        pinFlags     BIT STRING           (skipped)
+        pinType      ENUMERATED           -> pin_type  (0=bcd, 1=ascii-numeric, ...)
+        minLength    INTEGER              -> min_length
+        storedLength INTEGER              -> stored_length (the padded PIN length)
+        maxLength    INTEGER OPTIONAL
+        pinReference [0] INTEGER DEFAULT 0 -> pin_ref
+        padChar      OCTET STRING OPTIONAL -> pad_char
+
+    pin_ref prefers the spec's context-[0] tag; if a card (or fixture) encodes
+    it as a plain INTEGER instead, the last plain integer is used as a fallback.
+    '''
+
+    info = {'pin_ref': None, 'pin_type': None, 'min_length': None,
+            'stored_length': None, 'pad_char': None}
+    integers = []
+
+    pa = DerReader(pa_val)
+    while not pa.is_empty():
+        t, d = pa.read_tlv()
+        if t == 0x0A:      # ENUMERATED pinType
+            info['pin_type'] = int.from_bytes(d, 'big')
+        elif t == 0x02:    # INTEGER (minLength, storedLength, maxLength ...)
+            integers.append(int.from_bytes(d, 'big'))
+        elif t == 0x80:    # context [0] pinReference (spec-correct)
+            info['pin_ref'] = int.from_bytes(d, 'big')
+        elif t == 0x04:    # OCTET STRING padChar
+            info['pad_char'] = d[0] if d else None
+
+    if integers:
+        info['min_length'] = integers[0]
+    if len(integers) >= 2:
+        info['stored_length'] = integers[1]
+    # Fallback: card encoded pinReference as a plain trailing INTEGER
+    if info['pin_ref'] is None and integers:
+        info['pin_ref'] = integers[-1]
+        # That trailing integer was pinReference, not storedLength
+        if len(integers) == 2:
+            info['stored_length'] = None
+
+    return info
+
+
 def parse_aodf(aodf_bytes: bytes) -> dict:
-    ''' Parses the Authentication Object Directory to map logical Auth IDs to Hardware PIN Refs '''
-    
+    ''' Map each logical Auth ID to its PIN parameters (ref, type, padding) '''
+
     pins = {}
     reader = DerReader(aodf_bytes)
     while not reader.is_empty():
@@ -136,13 +183,13 @@ def parse_aodf(aodf_bytes: bytes) -> dict:
             tag, val = reader.read_tlv()
             # AODF entries are usually CHOICE. PINs are often [1] (0xA1) or SEQUENCE (0x30)
             if tag not in (0x30, 0xA1): continue
-            
+
             record = DerReader(val)
-            
-            # 1. CommonObjectAttributes
+
+            # CommonObjectAttributes
             _, coa_val = record.read_tlv()
-            
-            # 2. CommonAuthenticationObjectAttributes -> Contains the logical Auth ID
+
+            # CommonAuthenticationObjectAttributes -> Contains the logical Auth ID
             _, ca_val = record.read_tlv()
             ca = DerReader(ca_val)
             auth_id = None
@@ -151,31 +198,57 @@ def parse_aodf(aodf_bytes: bytes) -> dict:
                 if t == 0x04:  # OCTET STRING
                     auth_id = d
                     break
-                    
-            # 3. PinAttributes -> Contains the physical pinReference
+
+            # PinAttributes -> physical pinReference + padding parameters
             _, pa_val = record.read_tlv()
-            pa = DerReader(pa_val)
-            pin_ref = None
-            while not pa.is_empty():
-                t, d = pa.read_tlv()
-                if t == 0x02:  # INTEGER
-                    # PinAttributes has many integers (maxLength, minLength, etc.)
-                    # The last integer in the sequence is almost always the pinReference
-                    pin_ref = int.from_bytes(d, 'big')
-                    
-            if auth_id and pin_ref is not None:
-                pins[auth_id] = pin_ref
-                
+            info = _parse_pin_attributes(pa_val)
+
+            if auth_id and info['pin_ref'] is not None:
+                pins[auth_id] = info
+
         except Exception:
             continue
-            
+
     return pins
+
+
+# PKCS#15 pinType enumeration (subset we care about)
+PIN_TYPE_BCD = 0
+PIN_TYPE_ASCII_NUMERIC = 1
+PIN_TYPE_UTF8 = 2
+
+
+def encode_pkcs15_pin(pin: str, pin_info: dict = None) -> bytes:
+    '''
+    Encodes a PIN for a VERIFY / CHANGE APDU using the card's PinAttributes, 
+    or the common B-Trust convention - ASCII, padded to 8 bytes with 0xFF
+    '''
+
+    info = pin_info or {}
+    stored_length = info.get('stored_length') or 8
+    pad_char = info.get('pad_char')
+    pad_char = 0xFF if pad_char is None else pad_char
+    min_length = info.get('min_length') or 4
+
+    if not min_length <= len(pin) <= stored_length:
+        raise ValueError(f'PIN/PUK must be {min_length} to {stored_length} characters long.')
+
+    if info.get('pin_type') == PIN_TYPE_BCD:
+        # BCD: two decimal digits per byte, control nibble 0x2, padded with 0xF
+        digits = pin + 'F' * (stored_length * 2 - 1 - len(pin))
+        body = bytes([len(pin)]) + bytes(
+            int(digits[i:i+2], 16) for i in range(0, len(digits), 2)
+        )
+        return body[:stored_length]
+
+    # ASCII / numeric-ASCII / UTF-8 all encode the digits as bytes, then pad
+    return pin.encode('ascii').ljust(stored_length, bytes([pad_char]))
 
 
 def parse_pkcs15_filesystem(card_connection) -> dict:
     '''
-    Crawls the smart card filesystem and returns a mapped dictionary of 
-    all Certificates, Private Keys, and PIN References.
+    Crawl the smart card filesystem and returns a mapped dictionary of 
+    all Certificates, Private Keys, and PIN References
     '''
 
     filesystem_map = {

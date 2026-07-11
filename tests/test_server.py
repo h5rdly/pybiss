@@ -194,11 +194,11 @@ class TestMiniServer(unittest.IsolatedAsyncioTestCase):
         # MUST include the PNA bypass header
         self.assertIn(b'Access-Control-Allow-Private-Network: true', writer.output)
 
-    async def test_cors_dynamic_origin_reflection(self):
-        ''' Tests that if allowed_origins is '*', it dynamically reflects the requester '''
-        
+    async def test_cors_open_origin_matches_daemon(self):
+        ''' Default (no credentials): sends literal '*' like the official daemon, not a reflection '''
+
         app = MiniServer()
-        CORS(app, allowed_origins='*')
+        CORS(app)  # defaults: origin '*', no credentials
 
         req_text = (
             'GET /status HTTP/1.1\r\n'
@@ -208,10 +208,32 @@ class TestMiniServer(unittest.IsolatedAsyncioTestCase):
 
         reader = MockReader(req_text)
         writer = MockWriter()
-        
+
         await app.handle_client(reader, writer)
-        
+
+        self.assertIn(b'Access-Control-Allow-Origin: *', writer.output)
+        self.assertNotIn(b'Access-Control-Allow-Credentials', writer.output)
+        self.assertNotIn(b'random-site.com', writer.output)
+
+    async def test_cors_credentialed_mode_reflects_origin(self):
+        ''' Opt-in credentialed mode reflects the Origin (since '*' is forbidden with credentials) '''
+
+        app = MiniServer()
+        CORS(app, allow_credentials=True)
+
+        req_text = (
+            'GET /status HTTP/1.1\r\n'
+            'Origin: https://random-site.com\r\n'
+            '\r\n'
+        ).encode('utf-8')
+
+        reader = MockReader(req_text)
+        writer = MockWriter()
+
+        await app.handle_client(reader, writer)
+
         self.assertIn(b'Access-Control-Allow-Origin: https://random-site.com', writer.output)
+        self.assertIn(b'Access-Control-Allow-Credentials: true', writer.output)
 
 
 if __name__ == '__main__':

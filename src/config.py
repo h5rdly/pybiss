@@ -1,18 +1,18 @@
-import os, sys, configparser
+import os, sys, shutil, configparser
 from pathlib import Path
 
 
 class ConfigManager:
     ''' Manages persistent user settings in a local .ini file '''
-    
+
     def __init__(self, app_name='PyBISS', config_file_name='settings.ini'):
-        self.config_dir = self._get_config_dir(app_name)
+        self.config_dir = self._resolve_config_dir(app_name, config_file_name)
         self.config_file = self.config_dir / config_file_name
-        
+
         self.parser = configparser.ConfigParser()
         # Prevent configparser from converting keys to lowercase
-        self.parser.optionxform = str 
-        
+        self.parser.optionxform = str
+
         # Define the baseline defaults
         self.parser['Settings'] = {
             'signAPI': 'PKCS11',
@@ -22,10 +22,37 @@ class ConfigManager:
             'osStarted': 'True',
             'newSacRequired': 'True'
         }
-        
+
         self.load()
 
-    def _get_config_dir(self, app_name: str) -> Path:
+    @staticmethod
+    def _app_dir() -> Path:
+        ''' The pybiss root folder (parent of src/) '''
+        return Path(__file__).resolve().parent.parent
+
+    def _resolve_config_dir(self, app_name: str, config_file_name: str) -> Path:
+        app_dir = self._app_dir()
+        app_ini = app_dir / config_file_name
+        system_dir = self._system_config_dir(app_name)
+        system_ini = system_dir / config_file_name
+
+        if app_ini.exists():
+            return app_dir
+
+        if os.access(app_dir, os.W_OK):
+            # One-time migration of settings from an earlier system-dir install
+            if system_ini.exists():
+                try:
+                    shutil.copy2(system_ini, app_ini)
+                except Exception:
+                    pass
+            return app_dir
+
+        # App folder is read-only (system-wide install): per-user config dir
+        return system_dir
+
+    @staticmethod
+    def _system_config_dir(app_name: str) -> Path:
         if os.name == 'nt':
             base = os.getenv('APPDATA', str(Path.home() / 'AppData' / 'Roaming'))
             return Path(base) / app_name

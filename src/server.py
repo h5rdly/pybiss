@@ -21,33 +21,32 @@ class Request:
 
 class CORS:
     
-    def __init__(self, app, allowed_origins='*', allow_credentials=True):
+    def __init__(self, app, allowed_origins='*', allow_credentials=False):
 
         self.allowed_origins = allowed_origins
+        # The security boundary is the per-request jwsData signature, not CORS. 
         self.allow_credentials = allow_credentials
-        # Attach the CORS handler to the application instance
         app.cors = self
 
 
     def get_headers(self, req_headers: dict) -> dict:
 
         headers = {}
-        origin = req_headers.get('origin', '*')
-        
-        # Browsers strictly forbid '*' if allow_credentials is True.
-        # To bypass this, we dynamically reflect the requesting Origin.
-        headers['Access-Control-Allow-Origin'] = origin if self.allowed_origins == '*' else self.allowed_origins
-        
         if self.allow_credentials:
+            # Credentialed mode forbids '*', so reflect the caller's Origin
+            headers['Access-Control-Allow-Origin'] = req_headers.get('origin', '*')
             headers['Access-Control-Allow-Credentials'] = 'true'
-            
-        headers['Access-Control-Allow-Methods'] = 'GET, POST, PUT, DELETE, OPTIONS'
-        headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, Accept'
-        
-        # For BISS: Chrome Private Network Access (PNA) bypass
+        else:
+            # Match the daemon: literal '*'
+            headers['Access-Control-Allow-Origin'] = self.allowed_origins
+
+        headers['Access-Control-Allow-Methods'] = 'GET, POST'
+        headers['Access-Control-Allow-Headers'] = 'Accept, Content-Type'
+
+        # Chrome Private Network Access (PNA) preflight bypass for HTTPS -> loopback
         if req_headers.get('access-control-request-private-network') == 'true':
             headers['Access-Control-Allow-Private-Network'] = 'true'
-            
+
         return headers
 
 
@@ -149,12 +148,14 @@ class MiniServer:
             await writer.wait_closed()
 
 
-    def run(self, host='127.0.0.1', port=8080, use_ssl=False):
+    def run(self, host='127.0.0.1', port=8080, use_ssl=False, certfile=None, keyfile=None):
 
         ssl_context = None
         if use_ssl:
+            if not certfile or not keyfile:
+                raise ValueError('use_ssl requires certfile and keyfile')
             ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
-            ssl_context.load_cert_chain(certfile='localhost.pem', keyfile='localhost.key')
+            ssl_context.load_cert_chain(certfile=certfile, keyfile=keyfile)
 
         async def serve():
             self._shutdown = asyncio.Event()

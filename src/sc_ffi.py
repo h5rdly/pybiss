@@ -4,7 +4,7 @@ from contextlib import contextmanager
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from src.sc_types import * 
+from sc_types import *
 
 
 # --- High-Level Pythonic Encapsulation ---
@@ -13,7 +13,7 @@ def establish_context() -> SCARDCONTEXT:
     ''' Initializes the PC/SC subsystem '''
 
     hcontext = SCARDCONTEXT()
-    res = SCardEstablishContext_fn(SCARD_SCOPE_USER, None, None, byref(hcontext))
+    res = pcsc().SCardEstablishContext_fn(SCARD_SCOPE_USER, None, None, byref(hcontext))
     if res != SCARD_S_SUCCESS:
         raise Exception(f'SCardEstablishContext failed: {hex(res)}')
     return hcontext
@@ -21,27 +21,28 @@ def establish_context() -> SCARDCONTEXT:
 
 def release_context(hcontext: SCARDCONTEXT):
     ''' Frees the PC/SC subsystem resources '''
-    SCardReleaseContext_fn(hcontext)
+    pcsc().SCardReleaseContext_fn(hcontext)
 
 
 def disconnect_card(hcard: SCARDHANDLE, disposition=SCARD_RESET_CARD):
     ''' Disconnects from the card '''
 
-    SCardDisconnect_fn(hcard, disposition)
+    pcsc().SCardDisconnect_fn(hcard, disposition)
 
 
 def list_readers(hcontext: SCARDCONTEXT) -> list[str]:
     ''' Returns a list of connected smart card readers '''
 
+    p = pcsc()
     length = DWORD(0)
     # First pass: get required buffer length
-    res = SCardListReaders_fn(hcontext, None, None, byref(length))
+    res = p.SCardListReaders_fn(hcontext, None, None, byref(length))
     if res != SCARD_S_SUCCESS:
         return []
-    
+
     # Second pass: fetch the readers
     buffer = create_string_buffer(length.value)
-    res = SCardListReaders_fn(hcontext, None, buffer, byref(length))
+    res = p.SCardListReaders_fn(hcontext, None, buffer, byref(length))
     if res != SCARD_S_SUCCESS:
         return []
     
@@ -56,8 +57,8 @@ def connect_card(hcontext: SCARDCONTEXT, reader_name: str):
     hcard = SCARDHANDLE()
     active_proto = DWORD()
     
-    res = SCardConnect_fn(
-        hcontext, 
+    res = pcsc().SCardConnect_fn(
+        hcontext,
         reader_name.encode('utf-8'), 
         SCARD_SHARE_SHARED, 
         SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1, 
@@ -78,7 +79,7 @@ def get_atr(hcard: SCARDHANDLE) -> bytes:
     atr_len = DWORD(MAX_ATR_SIZE)
     atr_buf = (c_ubyte * MAX_ATR_SIZE)()
     
-    res = SCardStatus_fn(hcard, None, byref(reader_len), byref(state), byref(protocol), atr_buf, byref(atr_len))
+    res = pcsc().SCardStatus_fn(hcard, None, byref(reader_len), byref(state), byref(protocol), atr_buf, byref(atr_len))
     if res != SCARD_S_SUCCESS:
         raise Exception(f'SCardStatus failed: {hex(res)}')
         
@@ -95,14 +96,14 @@ def transaction(hcard: SCARDHANDLE):
             transmit_apdu(...)
     '''
 
-    res = SCardBeginTransaction_fn(hcard)
+    res = pcsc().SCardBeginTransaction_fn(hcard)
     if res != SCARD_S_SUCCESS:
         raise Exception(f'SCardBeginTransaction failed: {hex(res)}')
     try:
         yield
     finally:
         # End transaction and leave the card in its current state
-        SCardEndTransaction_fn(hcard, SCARD_LEAVE_CARD)
+        pcsc().SCardEndTransaction_fn(hcard, SCARD_LEAVE_CARD)
 
 
 def transmit_apdu(hcard: SCARDHANDLE, apdu_bytes: bytes, protocol: int = SCARD_PROTOCOL_T0) -> bytes:
@@ -114,9 +115,10 @@ def transmit_apdu(hcard: SCARDHANDLE, apdu_bytes: bytes, protocol: int = SCARD_P
     recv_length = DWORD(MAX_BUFFER_SIZE_EXTENDED)
     recv_buffer = (c_ubyte * recv_length.value)()
     
-    pci_pointer = byref(g_rgSCardT0Pci) if protocol == SCARD_PROTOCOL_T0 else byref(g_rgSCardT1Pci)
-    
-    res = SCardTransmit_fn(
+    p = pcsc()
+    pci_pointer = byref(p.g_rgSCardT0Pci) if protocol == SCARD_PROTOCOL_T0 else byref(p.g_rgSCardT1Pci)
+
+    res = p.SCardTransmit_fn(
         hcard,
         pci_pointer,
         send_buffer,

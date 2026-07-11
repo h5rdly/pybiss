@@ -227,8 +227,9 @@ def write_certificate(funcs, slot_id: int, pin: str, cert_der: bytes):
         funcs.C_Finalize(None)
 
 
-def generate_rsa_keypair(funcs, slot_id: int, pin: str, label: str = "New RSA Key", key_id: bytes = b''):
-    ''' C_GenerateKeyPair: Hardware-level generation of 2048-bit RSA keys '''
+def generate_rsa_keypair(funcs, slot_id: int, pin: str, label: str = "New RSA Key", key_id: bytes = b'',
+                         key_size_bits: int = 2048):
+    ''' C_GenerateKeyPair: Hardware-level generation of RSA keys '''
 
     funcs.C_Initialize(None)
     session = CK_SESSION_HANDLE()
@@ -248,7 +249,7 @@ def generate_rsa_keypair(funcs, slot_id: int, pin: str, label: str = "New RSA Ke
             CKA_VERIFY: True,
             CKA_ENCRYPT: True,
             CKA_LABEL: label,
-            CKA_MODULUS_BITS: 2048,
+            CKA_MODULUS_BITS: key_size_bits,
             CKA_PUBLIC_EXPONENT: b'\x01\x00\x01'   # 65537
         }
         
@@ -555,14 +556,15 @@ def delete_object_by_label(funcs, slot_id: int, pin: str, object_class: int, lab
         funcs.C_Finalize(None)
 
 
-def generate_spkac(funcs, slot_id: int, pin: str, key_id: bytes, challenge: str) -> str:
-    ''' 
-    Generates an RSA Keypair on the token, extracts the raw public parameters, 
+def generate_spkac(funcs, slot_id: int, pin: str, key_id: bytes, challenge: str, key_size_bits: int = 2048) -> str:
+    '''
+    Generates an RSA Keypair on the token, extracts the raw public parameters,
     and produces a signed SPKAC request for a CA portal renewal.
     '''
 
     # Tell the token to physically generate the RSA keys
-    generate_rsa_keypair(funcs, slot_id, pin, label="B-Trust Renewal Key", key_id=key_id)
+    generate_rsa_keypair(funcs, slot_id, pin, label="B-Trust Renewal Key", key_id=key_id,
+                         key_size_bits=key_size_bits)
 
     funcs.C_Initialize(None)
     session = CK_SESSION_HANDLE()
@@ -591,7 +593,7 @@ def generate_spkac(funcs, slot_id: int, pin: str, key_id: bytes, challenge: str)
         if obj_count.value == 0:
             raise Exception("Failed to locate the newly generated public key on the token.")
 
-        # 3. Extract the Raw Modulus and Exponent
+        # Extract the Raw Modulus and Exponent
         get_template = (CK_ATTRIBUTE * 2)()
         get_template[0].type, get_template[0].pValue, get_template[0].ulValueLen = CKA_MODULUS, None, 0
         get_template[1].type, get_template[1].pValue, get_template[1].ulValueLen = CKA_PUBLIC_EXPONENT, None, 0

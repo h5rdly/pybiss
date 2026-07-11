@@ -4,8 +4,8 @@ from datetime import datetime, timezone
 sys.path.append(f'{__file__.replace("\\", "/").rsplit("/", 2)[0]}')
 
 from src.cert_parser import (
-    DerReader, _decode_string, _parse_time, _parse_name, 
-    get_x509_subject, get_x509_metadata, get_rsa_public_key
+    DerReader, _decode_string, _parse_time, _parse_name,
+    get_x509_subject, get_x509_metadata, get_rsa_public_key, pem_to_der
 )
 
 # Real-world certificate (Subject: CN=Testing)
@@ -122,6 +122,34 @@ class TestCertParser(unittest.TestCase):
         n, e = get_rsa_public_key(CERT_BYTES)
         assert isinstance(n, int)
         assert e == 65537
+
+
+class TestPemToDer(unittest.TestCase):
+
+    def _pem(self, der: bytes) -> bytes:
+        b64 = base64.encodebytes(der)
+        return b'-----BEGIN CERTIFICATE-----\n' + b64 + b'-----END CERTIFICATE-----\n'
+
+    def test_single_pem_certificate(self):
+        der = base64.b64decode(REAL_CERT_B64)
+        self.assertEqual(pem_to_der(self._pem(der)), [der])
+
+    def test_multi_certificate_bundle_keeps_every_cert(self):
+        ''' A root+intermediate bundle must not silently lose certificates '''
+
+        der = base64.b64decode(REAL_CERT_B64)
+        bundle = self._pem(der) + b'# comment between blocks\n' + self._pem(der)
+        self.assertEqual(pem_to_der(bundle), [der, der])
+
+    def test_raw_der_passes_through(self):
+        der = base64.b64decode(REAL_CERT_B64)
+        self.assertEqual(pem_to_der(der), [der])
+
+    def test_garbage_block_skipped(self):
+        der = base64.b64decode(REAL_CERT_B64)
+        bundle = (b'-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----\n'
+                  + self._pem(der))
+        self.assertEqual(pem_to_der(bundle), [der])
 
 
 if __name__ == '__main__':

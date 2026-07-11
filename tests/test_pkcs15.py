@@ -2,7 +2,10 @@ import sys, unittest
 
 sys.path.append(f'{__file__.replace("\\", "/").rsplit("/", 2)[0]}')
 
-from src.pkcs15 import parse_cdf, parse_prkdf, parse_pkcs15_filesystem, _extract_path
+from src.pkcs15 import (
+    parse_cdf, parse_prkdf, parse_pkcs15_filesystem, parse_aodf, _extract_path,
+    encode_pkcs15_pin,
+)
 
 
 class TestPKCS15Explorer(unittest.TestCase):
@@ -195,16 +198,63 @@ class TestPKCS15Explorer(unittest.TestCase):
                 b'\x02\x01\x81'     # PinReference = 0x81
         )
         
-        # We need to import parse_aodf at the top of the file!
-        from src.pkcs15 import parse_aodf 
-        
         pin_map = parse_aodf(mock_aodf)
-        
+
         assert len(pin_map) == 1
         assert b'\x00\x01' in pin_map
-        assert pin_map[b'\x00\x01'] == 0x81
+        # pinReference encoded as a plain trailing INTEGER -> fallback path
+        assert pin_map[b'\x00\x01']['pin_ref'] == 0x81
+        assert pin_map[b'\x00\x01']['pin_type'] == 1
+        assert pin_map[b'\x00\x01']['min_length'] == 4
 
-        
+    def test_parse_aodf_spec_context_tagged_pin_ref(self):
+        ''' Spec-correct cards tag pinReference as [0] and carry storedLength + padChar '''
+
+        # PinAttributes: flags, type=ascii(1), minLen=4, storedLen=6,
+        #                pinRef [0]=0x82, padChar=0x00
+        mock_aodf = (
+            b'\x30\x1D'
+            b'\x30\x00'                       # COA empty
+            b'\x30\x04\x04\x02\x00\x02'       # CAOA: AuthID = 00 02
+            b'\x30\x13'                       # PinAttributes (19 bytes)
+                b'\x03\x02\x00\xC0'           # PinFlags
+                b'\x0A\x01\x01'               # PinType = ascii-numeric
+                b'\x02\x01\x04'               # minLength = 4
+                b'\x02\x01\x06'               # storedLength = 6
+                b'\x80\x01\x82'               # [0] pinReference = 0x82
+                b'\x04\x01\x00'               # padChar = 0x00
+        )
+
+        info = parse_aodf(mock_aodf)[b'\x00\x02']
+        assert info['pin_ref'] == 0x82
+        assert info['stored_length'] == 6
+        assert info['pad_char'] == 0x00
+        assert info['min_length'] == 4
+
+
+class TestEncodePin(unittest.TestCase):
+
+    def test_default_encoding_matches_btrust_convention(self):
+        ''' No card info -> ASCII, padded to 8 bytes with 0xFF '''
+        self.assertEqual(encode_pkcs15_pin('1234'), bytes.fromhex('31323334FFFFFFFF'))
+
+    def test_card_derived_stored_length_and_pad_char(self):
+        info = {'pin_ref': 0x82, 'stored_length': 6, 'pad_char': 0x00, 'min_length': 4}
+        self.assertEqual(encode_pkcs15_pin('1234', info), bytes.fromhex('313233340000'))
+
+    def test_rejects_pin_longer_than_stored_length(self):
+        info = {'stored_length': 6, 'min_length': 4}
+        with self.assertRaises(ValueError):
+            encode_pkcs15_pin('1234567', info)
+
+    def test_rejects_pin_shorter_than_min_length(self):
+        with self.assertRaises(ValueError):
+            encode_pkcs15_pin('12')  # default min 4
+
+    def test_default_rejects_over_eight(self):
+        with self.assertRaises(ValueError):
+            encode_pkcs15_pin('123456789')
+
 
 if __name__ == '__main__':
     unittest.main()

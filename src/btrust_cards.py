@@ -5,7 +5,7 @@ sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 from sc_types import SCARDHANDLE
 from sc_ffi import SmartCardConnection
 from sc_apdu import pad_pkcs1_v15_sha256, read_binary_file, build_apdu, decode_ecdsa_signature, ber_tlv
-from pkcs15 import parse_pkcs15_filesystem
+from pkcs15 import parse_pkcs15_filesystem, encode_pkcs15_pin
 
 
 # --- Known ATRs for the card families B-Trust issues ---
@@ -39,30 +39,20 @@ SCHSM_ATRS = [
 
 
 
-def _encode_pin(pin: str) -> bytes:
-    '''
-    ASCII PIN padded with 0xFF to 8 bytes. Length is validated strictly:
-    an over-long PIN would produce a malformed APDU, and the card treats
-    any malformed VERIFY the same as a wrong PIN - it burns a retry.
-    '''
-
-    if not 4 <= len(pin) <= 8:
-        raise ValueError('PIN/PUK must be 4 to 8 characters long.')
-    return pin.encode('ascii').ljust(8, b'\xFF')
-
-
 class BaseCardDriver:
     ''' Abstract base class for B-Trust smart cards '''
 
     def __init__(self, connection: SmartCardConnection):
         self.conn = connection
 
-    def verify_pin(self, pin: str, pin_ref: int = 0x81):
+    def verify_pin(self, pin: str, pin_ref: int = 0x81, pin_info: dict = None):
         ''' Standard ISO 7816-4 PIN Verification '''
 
-        pin_bytes = _encode_pin(pin)
-        # CLA=00, INS=20 (Verify), P1=00, P2=pin_ref, Lc=08
-        apdu = bytes([0x00, 0x20, 0x00, pin_ref, 0x08]) + pin_bytes
+        if pin_info and pin_info.get('pin_ref') is not None:
+            pin_ref = pin_info['pin_ref']
+        pin_bytes = encode_pkcs15_pin(pin, pin_info)
+        # CLA=00, INS=20 (Verify), P1=00, P2=pin_ref, Lc=len(padded PIN)
+        apdu = bytes([0x00, 0x20, 0x00, pin_ref, len(pin_bytes)]) + pin_bytes
         
         resp = self.conn.transmit(apdu)
         if resp[-2:] == b'\x90\x00':
@@ -76,11 +66,13 @@ class BaseCardDriver:
             raise Exception(f'PIN Verification failed: {resp[-2:].hex().upper()}')
 
 
-    def change_pin(self, old_pin: str, new_pin: str, pin_ref: int = 0x81):
+    def change_pin(self, old_pin: str, new_pin: str, pin_ref: int = 0x81, pin_info: dict = None):
         ''' Standard ISO 7816-4 Change Reference Data (Change PIN) '''
-        
-        # PINs are ASCII, padded with 0xFF to 8 bytes, concatenated
-        payload = _encode_pin(old_pin) + _encode_pin(new_pin)
+
+        if pin_info and pin_info.get('pin_ref') is not None:
+            pin_ref = pin_info['pin_ref']
+        # Old and new PINs encoded per the card's PinAttributes, concatenated
+        payload = encode_pkcs15_pin(old_pin, pin_info) + encode_pkcs15_pin(new_pin, pin_info)
         
         # CLA=00, INS=24 (Change), P1=00, P2=pin_ref, Data=payload
         apdu = build_apdu(0x00, 0x24, 0x00, pin_ref, data=payload)
@@ -91,11 +83,13 @@ class BaseCardDriver:
         return True
 
 
-    def unblock_pin(self, puk: str, new_pin: str, pin_ref: int = 0x81):
+    def unblock_pin(self, puk: str, new_pin: str, pin_ref: int = 0x81, pin_info: dict = None):
         ''' Standard ISO 7816-4 Reset Retry Counter (Unblock with PUK) '''
-        
-        # PUK and New PIN are ASCII, padded with 0xFF to 8 bytes, concatenated
-        payload = _encode_pin(puk) + _encode_pin(new_pin)
+
+        if pin_info and pin_info.get('pin_ref') is not None:
+            pin_ref = pin_info['pin_ref']
+        # PUK and New PIN encoded per the card's PinAttributes, concatenated
+        payload = encode_pkcs15_pin(puk, pin_info) + encode_pkcs15_pin(new_pin, pin_info)
         
         # CLA=00, INS=2C (Reset Retry Counter), P1=00, P2=pin_ref, Data=payload
         apdu = build_apdu(0x00, 0x2C, 0x00, pin_ref, data=payload)

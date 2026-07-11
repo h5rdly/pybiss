@@ -100,90 +100,76 @@ class SCARD_READERSTATE(Structure):
     ]
 
 
-# --- Load the OS-specific library (Import-Safe) ---
+# --- Lazy PC/SC library binding ---
 
-SCardEstablishContext_fn = None
-g_rgSCardT0Pci = None
-g_rgSCardT1Pci = None
+# The native library is loaded and bound the first time pcsc() is called
 
-if sys.platform == 'win32':
-    # Windows uses __stdcall calling convention
-    scard_lib = WinDLL('winscard.dll')
-    
-    # Map the 'A' (ASCII) variants of Windows string functions
-    SCardEstablishContext_fn = scard_lib.SCardEstablishContext
-    SCardListReaders_fn      = scard_lib.SCardListReadersA
-    SCardConnect_fn          = scard_lib.SCardConnectA
-    SCardTransmit_fn         = scard_lib.SCardTransmit
-    SCardDisconnect_fn       = scard_lib.SCardDisconnect
-    SCardReleaseContext_fn   = scard_lib.SCardReleaseContext
-    SCardBeginTransaction_fn = scard_lib.SCardBeginTransaction
-    SCardEndTransaction_fn   = scard_lib.SCardEndTransaction
-    SCardStatus_fn           = scard_lib.SCardStatusA
-
-elif sys.platform == 'darwin':
-    # macOS uses the native PCSC Framework
-    scard_lib = CDLL('/System/Library/Frameworks/PCSC.framework/PCSC')
-    
-    SCardEstablishContext_fn = scard_lib.SCardEstablishContext
-    SCardListReaders_fn      = scard_lib.SCardListReaders
-    SCardConnect_fn          = scard_lib.SCardConnect
-    SCardTransmit_fn         = scard_lib.SCardTransmit
-    SCardDisconnect_fn       = scard_lib.SCardDisconnect
-    SCardReleaseContext_fn   = scard_lib.SCardReleaseContext
-    SCardBeginTransaction_fn = scard_lib.SCardBeginTransaction
-    SCardEndTransaction_fn   = scard_lib.SCardEndTransaction
-    SCardStatus_fn           = scard_lib.SCardStatus
-
-elif sys.platform.startswith('linux') or sys.platform.startswith('freebsd'):
-    # Linux, Alpine, and FreeBSD use the standard open-source pcsclite daemon
-    try:
-        scard_lib = CDLL('libpcsclite.so.1')
-    except OSError:
-        scard_lib = CDLL('libpcsclite.so')
-        
-    SCardEstablishContext_fn = scard_lib.SCardEstablishContext
-    SCardListReaders_fn      = scard_lib.SCardListReaders
-    SCardConnect_fn          = scard_lib.SCardConnect
-    SCardTransmit_fn         = scard_lib.SCardTransmit
-    SCardDisconnect_fn       = scard_lib.SCardDisconnect
-    SCardReleaseContext_fn   = scard_lib.SCardReleaseContext
-    SCardBeginTransaction_fn = scard_lib.SCardBeginTransaction
-    SCardEndTransaction_fn   = scard_lib.SCardEndTransaction
-    SCardStatus_fn           = scard_lib.SCardStatus
-    
-else:
-    raise NotImplementedError(f'Platform {sys.platform} not supported')
+_pcsc = None
 
 
-# --- Define Argument and Return Types ---
-SCardEstablishContext_fn.argtypes = [DWORD, c_void_p, c_void_p, LPSCARDCONTEXT]
-SCardEstablishContext_fn.restype = LONG
+class _PCSC:
+    ''' Holds the bound SCard* functions and the global PCI request blocks '''
+    pass
 
-SCardListReaders_fn.argtypes = [SCARDCONTEXT, LPCSTR, LPSTR, LPDWORD]
-SCardListReaders_fn.restype = LONG
 
-SCardConnect_fn.argtypes = [SCARDCONTEXT, LPCSTR, DWORD, DWORD, LPSCARDHANDLE, LPDWORD]
-SCardConnect_fn.restype = LONG
+def pcsc() -> _PCSC:
+    ''' Loads winscard/pcsclite once and returns the bound function namespace '''
 
-SCardTransmit_fn.argtypes = [SCARDHANDLE, POINTER(SCARD_IO_REQUEST), LPCBYTE, DWORD, POINTER(SCARD_IO_REQUEST), LPBYTE, LPDWORD]
-SCardTransmit_fn.restype = LONG
+    global _pcsc
+    if _pcsc is not None:
+        return _pcsc
 
-SCardDisconnect_fn.argtypes = [SCARDHANDLE, DWORD]
-SCardDisconnect_fn.restype = LONG
+    if sys.platform == 'win32':
+        # Windows uses __stdcall and the 'A' (ASCII) string-function variants
+        lib = WinDLL('winscard.dll')
+        list_fn, connect_fn, status_fn = 'SCardListReadersA', 'SCardConnectA', 'SCardStatusA'
+    elif sys.platform == 'darwin':
+        lib = CDLL('/System/Library/Frameworks/PCSC.framework/PCSC')
+        list_fn, connect_fn, status_fn = 'SCardListReaders', 'SCardConnect', 'SCardStatus'
+    elif sys.platform.startswith('linux') or sys.platform.startswith('freebsd'):
+        # Linux, Alpine, and FreeBSD use the open-source pcsclite daemon
+        try:
+            lib = CDLL('libpcsclite.so.1')
+        except OSError:
+            lib = CDLL('libpcsclite.so')
+        list_fn, connect_fn, status_fn = 'SCardListReaders', 'SCardConnect', 'SCardStatus'
+    else:
+        raise NotImplementedError(f'Platform {sys.platform} not supported')
 
-SCardReleaseContext_fn.argtypes = [SCARDCONTEXT]
-SCardReleaseContext_fn.restype = LONG
+    p = _PCSC()
+    p.SCardEstablishContext_fn = lib.SCardEstablishContext
+    p.SCardListReaders_fn      = getattr(lib, list_fn)
+    p.SCardConnect_fn          = getattr(lib, connect_fn)
+    p.SCardStatus_fn           = getattr(lib, status_fn)
+    p.SCardTransmit_fn         = lib.SCardTransmit
+    p.SCardDisconnect_fn       = lib.SCardDisconnect
+    p.SCardReleaseContext_fn   = lib.SCardReleaseContext
+    p.SCardBeginTransaction_fn = lib.SCardBeginTransaction
+    p.SCardEndTransaction_fn   = lib.SCardEndTransaction
 
-SCardBeginTransaction_fn.argtypes = [SCARDHANDLE]
-SCardBeginTransaction_fn.restype = LONG
+    # Argument and return types (guards against 64-bit pointer truncation)
+    p.SCardEstablishContext_fn.argtypes = [DWORD, c_void_p, c_void_p, LPSCARDCONTEXT]
+    p.SCardEstablishContext_fn.restype = LONG
+    p.SCardListReaders_fn.argtypes = [SCARDCONTEXT, LPCSTR, LPSTR, LPDWORD]
+    p.SCardListReaders_fn.restype = LONG
+    p.SCardConnect_fn.argtypes = [SCARDCONTEXT, LPCSTR, DWORD, DWORD, LPSCARDHANDLE, LPDWORD]
+    p.SCardConnect_fn.restype = LONG
+    p.SCardTransmit_fn.argtypes = [SCARDHANDLE, POINTER(SCARD_IO_REQUEST), LPCBYTE, DWORD, POINTER(SCARD_IO_REQUEST), LPBYTE, LPDWORD]
+    p.SCardTransmit_fn.restype = LONG
+    p.SCardDisconnect_fn.argtypes = [SCARDHANDLE, DWORD]
+    p.SCardDisconnect_fn.restype = LONG
+    p.SCardReleaseContext_fn.argtypes = [SCARDCONTEXT]
+    p.SCardReleaseContext_fn.restype = LONG
+    p.SCardBeginTransaction_fn.argtypes = [SCARDHANDLE]
+    p.SCardBeginTransaction_fn.restype = LONG
+    p.SCardEndTransaction_fn.argtypes = [SCARDHANDLE, DWORD]
+    p.SCardEndTransaction_fn.restype = LONG
+    p.SCardStatus_fn.argtypes = [SCARDHANDLE, LPSTR, LPDWORD, LPDWORD, LPDWORD, LPBYTE, LPDWORD]
+    p.SCardStatus_fn.restype = LONG
 
-SCardEndTransaction_fn.argtypes = [SCARDHANDLE, DWORD]
-SCardEndTransaction_fn.restype = LONG
+    # Global PCI T0/T1 request blocks (required for SCardTransmit)
+    p.g_rgSCardT0Pci = SCARD_IO_REQUEST.in_dll(lib, 'g_rgSCardT0Pci')
+    p.g_rgSCardT1Pci = SCARD_IO_REQUEST.in_dll(lib, 'g_rgSCardT1Pci')
 
-SCardStatus_fn.argtypes = [SCARDHANDLE, LPSTR, LPDWORD, LPDWORD, LPDWORD, LPBYTE, LPDWORD]
-SCardStatus_fn.restype = LONG
-
-# Export the global PCI T0/T1 pointers (required for SCardTransmit)
-g_rgSCardT0Pci = SCARD_IO_REQUEST.in_dll(scard_lib, 'g_rgSCardT0Pci')
-g_rgSCardT1Pci = SCARD_IO_REQUEST.in_dll(scard_lib, 'g_rgSCardT1Pci')
+    _pcsc = p
+    return _pcsc

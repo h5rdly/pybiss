@@ -62,6 +62,20 @@ class TestBTrustCards(unittest.TestCase):
         # Verify the APDU was padded correctly (00 20 00 81 08 31 32 33 34 FF FF FF FF)
         assert self.fake_conn.last_transmitted_apdu == bytes.fromhex('002000810831323334FFFFFFFF')
 
+
+    def test_base_driver_pin_uses_card_aodf_params(self):
+        ''' AODF pin_info overrides the hardcoded ref and padding '''
+        
+        self.fake_conn.transmit_responses = [b'\x90\x00']
+        driver = BaseCardDriver(self.fake_conn)
+
+        pin_info = {'pin_ref': 0x82, 'stored_length': 6, 'pad_char': 0x00, 'min_length': 4}
+        assert driver.verify_pin('1234', pin_info=pin_info) is True
+
+        # P2 = 0x82 (card ref), Lc = 0x06, PIN padded to 6 bytes with 0x00
+        assert self.fake_conn.last_transmitted_apdu == bytes.fromhex('0020008206313233340000')
+
+
     def test_base_driver_pin_wrong_retries(self):
         self.fake_conn.transmit_responses = [b'\x63\xC2'] # 2 retries left
         driver = BaseCardDriver(self.fake_conn)
@@ -69,6 +83,7 @@ class TestBTrustCards(unittest.TestCase):
         with self.assertRaises(Exception) as context:
             driver.verify_pin('9999')
         assert '2 retries remaining' in str(context.exception)
+
 
     def test_base_driver_pin_blocked(self):
         self.fake_conn.transmit_responses = [b'\x69\x83'] # Blocked APDU
