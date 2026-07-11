@@ -20,7 +20,8 @@ class ConfigManager:
             'pfxPath': '',
             'language': 'en',
             'osStarted': 'True',
-            'newSacRequired': 'True'
+            'newSacRequired': 'True',
+            'apduWhitelist': ''
         }
 
         self.load()

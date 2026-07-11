@@ -1,7 +1,7 @@
 '''
 Full HTTP-level /sign round trip: a portal-shaped request goes through the
 real MiniServer HTTP parsing, server-signature verification, user
-confirmation, and (mocked) PKCS#11 signing - no hardware needed.
+confirmation, and mocked PKCS#11 signing
 '''
 
 import base64, hashlib, json, sys, unittest
@@ -13,9 +13,10 @@ from src.app import app
 from src.sc_apdu import pad_pkcs1_v15_sha256
 # app.py imports ui_bridge as a bare module; use the same instance it sees
 from ui_bridge import set_ui_provider
-from tests.x509_helpers import build_cert, TEST_N, TEST_D
-from tests.test_server import MockReader, MockWriter
-from tests.mocks import FakeUI
+
+from x509_helpers import build_cert, TEST_N, TEST_D
+from test_server import MockReader, MockWriter
+from mocks import FakeUI
 
 
 def rsa_sign(payload: bytes) -> bytes:
@@ -96,6 +97,32 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
                          [base64.b64encode(b'FAKE_CARD_SIGNATURE').decode()])
         # The card was asked to sign the document itself
         self.assertEqual(self.sign_mock.call_args.kwargs['payload'], self.document)
+
+    async def test_whitelisted_apdu_card_falls_through_to_pkcs11(self):
+        '''
+        A validated / whitelisted card resolves to [apdu, pkcs11] on Linux, but
+        APDU signing is not enabled yet - it must fall through to PKCS#11 and
+        still sign
+        '''
+
+        atr = '3B7F96000080318065B0855956FB120FFE829000'
+        from src.app import config
+        orig = config.parser.get('Settings', 'apduWhitelist', fallback=None)
+        config.parser.set('Settings', 'apduWhitelist', atr)
+        try:
+            with patch('src.app.detector.get_connected_atrs', return_value=[atr]), \
+                 patch('src.app.sys.platform', 'linux'):
+                body = portal_sign_request(self.document, self.signer_der, self.server_der)
+                status, resp = await http_post('/sign', body)
+        finally:
+            if orig is None:
+                config.parser.remove_option('Settings', 'apduWhitelist')
+            else:
+                config.parser.set('Settings', 'apduWhitelist', orig)
+
+        data = json.loads(resp)
+        self.assertEqual(data['status'], 'ok')          # signed despite APDU being first
+        self.sign_mock.assert_called()                  # via the PKCS#11 fallthrough
 
     async def test_bad_server_signature_never_reaches_the_card(self):
         ''' A tampered server signature is rejected before any signing happens '''

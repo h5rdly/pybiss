@@ -2,7 +2,7 @@ import base64, functools, os, sys
 
 sys.path.insert(0, __file__.replace('\\', '/').rsplit('/', 1)[0])
 
-import detector, hardware, service, jws, transport 
+import detector, hardware, service, jws, transport, backends
 
 from cert_parser import pem_to_der
 from config import config
@@ -409,83 +409,109 @@ def del_cert(req, payload):
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
 
 
-@app.post('/getsigner')
-def get_signer(req):
+def _detected_atr() -> str:
+    ''' First connected card ATR (upper hex), or '' - used to pick a backend '''
+    try:
+        atrs = detector.get_connected_atrs()
+        return atrs[0].upper() if atrs else ''
+    except Exception:
+        return ''
 
-    data = req.json
-    selector = data.get('selector')
-    show_valid_certs = data.get('showValidCerts', True)
 
-    ui_provider = get_ui_provider()
-    sign_api = config.get('signAPI', 'PKCS11')
-    
-    # - Windows Native Store (MSCAPI) Flow 
-    if sign_api == 'MSCAPI' and sys.platform == 'win32':
-        import mscapi as mscapi
-        raw_certs = mscapi.get_windows_certificates()
-        try:
-            filtered_certs = service.filter_certificates(
-                raw_certs, selector=selector, show_valid_certs=show_valid_certs
-            )
-            if not filtered_certs:
-                return {'chain': [], 'status': 'error', 'reasonCode': 404, 'reasonText': 'No matching certificates'}
-                
-            choice_idx = ui_provider.choose_certificate(filtered_certs)
-            if choice_idx == -1:
-                return {'chain': [], 'status': 'error', 'reasonCode': 400, 'reasonText': 'Canceled'}
+def _select_and_build_chain(filtered_certs, all_ders, ui_provider):
+    ''' Shared getsigner tail: let the user choose, then return the full chain '''
 
-            selected_cert = filtered_certs[choice_idx]
-            # The official daemon returns the full chain (leaf -> CA), built here
-            # from the other certificates the store exposes
-            chain_ders = service.build_certificate_chain(selected_cert['der'], [c['der'] for c in raw_certs])
-            chain = [base64.b64encode(der).decode('utf-8') for der in chain_ders]
-            return {'chain': chain, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
-        finally:
-            # Free contexts to prevent memory leaks!
-            for c in raw_certs:
-                mscapi.free_windows_certificate(c['windows_ctx'])
-                
-    # - PKCS11 (Hardware) Flow  
+    if not filtered_certs:
+        return {'chain': [], 'status': 'error', 'reasonCode': 404, 'reasonText': reason('error.no-certs-found')}
+    choice_idx = ui_provider.choose_certificate(filtered_certs)
+    if choice_idx == -1:
+        return {'chain': [], 'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.user-canceled')}
+    selected = filtered_certs[choice_idx]
+    chain_ders = service.build_certificate_chain(selected['der'], all_ders)
+    chain = [base64.b64encode(der).decode('utf-8') for der in chain_ders]
+    return {'chain': chain, 'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success')}
+
+
+def _getsigner_cng(selector, show_valid_certs, ui_provider):
+    if sys.platform != 'win32':
+        raise backends.BackendUnavailable('CNG is Windows-only')
+    import mscapi as mscapi
+    raw_certs = mscapi.get_windows_certificates()
+    try:
+        filtered = service.filter_certificates(raw_certs, selector=selector, show_valid_certs=show_valid_certs)
+        return _select_and_build_chain(filtered, [c['der'] for c in raw_certs], ui_provider)
+    finally:
+        for c in raw_certs:
+            mscapi.free_windows_certificate(c['windows_ctx'])
+
+
+def _getsigner_pkcs11(selector, show_valid_certs, ui_provider):
     lib_path = detector.auto_detect_library()
     if not lib_path:
-        raise Exception('No supported smart cards detected')
-        
+        raise backends.BackendUnavailable('No PKCS#11 library for the detected card')
+
     funcs = hardware.load_pkcs11(lib_path)
     slots = hardware.get_slots(funcs, token_present=True)
     if not slots:
-        raise Exception('No token present in smart card reader')
-    
-    ui_provider = get_ui_provider()
+        raise backends.BackendUnavailable('No token present')
+
     pin = ui_provider.prompt_pin()
     if not pin:
-        return {'chain': [], 'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN canceled'}
+        return {'chain': [], 'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
 
     all_certs = []
     for slot_id in slots:
         try:
-            certs = hardware.get_certificates(funcs, slot_id, pin)
-            for c in certs:
+            for c in hardware.get_certificates(funcs, slot_id, pin):
                 c['slot_id'] = slot_id
                 c['pin'] = pin
                 all_certs.append(c)
         except Exception:
             continue
 
-    filtered_certs = service.filter_certificates(all_certs, selector=selector, show_valid_certs=show_valid_certs)
-    if not filtered_certs:
-        return {'chain': [], 'status': 'error', 'reasonCode': 404, 'reasonText': 'No matching certificates'}
+    filtered = service.filter_certificates(all_certs, selector=selector, show_valid_certs=show_valid_certs)
+    return _select_and_build_chain(filtered, [c['der'] for c in all_certs], ui_provider)
 
-    choice_idx = ui_provider.choose_certificate(filtered_certs)
-    if choice_idx == -1:
-        return {'chain': [], 'status': 'error', 'reasonCode': 400, 'reasonText': 'Canceled'}
 
-    selected_cert = filtered_certs[choice_idx]
-    # The official daemon returns the full chain (leaf -> CA), built here from
-    # the CA certificates B-Trust cards carry alongside the personal ones
-    chain_ders = service.build_certificate_chain(selected_cert['der'], [c['der'] for c in all_certs])
-    chain = [base64.b64encode(der).decode('utf-8') for der in chain_ders]
+def _getsigner_apdu(selector, show_valid_certs, ui_provider):
+    ''' Read-only PKCS#15 certificate discovery over raw APDU (no PIN, safe) '''
+    
+    from sc_ffi import SmartCardConnection
+    from btrust_cards import BTrustDriver
 
-    return {'chain': chain, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
+    try:
+        conn_cm = SmartCardConnection()
+        conn = conn_cm.__enter__()
+    except Exception:
+        raise backends.BackendUnavailable('No card reachable over PC/SC')
+    try:
+        with conn.transaction():
+            driver = BTrustDriver.create(conn)
+            all_certs = [c for c in driver.discover_certificates() if c.get('der')]
+        filtered = service.filter_certificates(all_certs, selector=selector, show_valid_certs=show_valid_certs)
+        return _select_and_build_chain(filtered, [c['der'] for c in all_certs], ui_provider)
+    finally:
+        conn_cm.__exit__(None, None, None)
+
+
+_GETSIGNER = {'cng': _getsigner_cng, 'pkcs11': _getsigner_pkcs11, 'apdu': _getsigner_apdu}
+
+
+@app.post('/getsigner')
+def get_signer(req):
+
+    data = req.json
+    selector = data.get('selector')
+    show_valid_certs = data.get('showValidCerts', True)
+    ui_provider = get_ui_provider()
+
+    order = backends.resolve(backends.OP_READ, atr=_detected_atr(), config=config)
+    for name in order:
+        try:
+            return _GETSIGNER[name](selector, show_valid_certs, ui_provider)
+        except backends.BackendUnavailable:
+            continue
+    return {'chain': [], 'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.no-card-found')}
 
 
 @app.post('/sign')
@@ -545,104 +571,90 @@ def sign(req):
     except Exception:
          return {'signatures': [], 'status': 'error', 'reasonCode': 400, 'reasonText': 'Invalid signer certificate encoding'}
 
-    # Route to the correct Cryptographic Engine
-    from config import config
-    sign_api = config.get('signAPI', 'PKCS11')
-
-    # PATH A: Windows Native Store (MSCAPI / CNG)
-    if sign_api == 'MSCAPI' and sys.platform == 'win32':
-        import mscapi as mscapi
-        raw_certs = mscapi.get_windows_certificates()
+    # Route to a signing backend per the resolver, falling through on unavailability
+    order = backends.resolve(backends.OP_SIGN, atr=_detected_atr(), config=config)
+    for name in order:
         try:
-            target_ctx = None
-            for c in raw_certs:
-                if c['der'] == signer_cert_der:
-                    target_ctx = c['windows_ctx']
-                    break
-                    
-            if not target_ctx:
-                return {'signatures': [], 'status': 'error', 'reasonCode': 404, 'reasonText': 'Requested signing certificate not found in Windows Store'}
-            
-            # Prompt PIN just before signing
-            pin = ui_provider.prompt_pin()
-            if not pin:
-                return {'signatures': [], 'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN required'}
-                
-            generated_signatures = []
-            for payload_b64 in contents:
-                payload_bytes = base64.b64decode(payload_b64)
-                sig = mscapi.sign_payload_windows(
-                    cert_ctx_pointer=target_ctx,
-                    payload=payload_bytes,
-                    pin=pin,
-                    hash_alg=hash_algorithm
-                )
-                generated_signatures.append(base64.b64encode(sig).decode('utf-8'))
-                
-            return {'signatures': generated_signatures, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
-            
-        except Exception as e:
-            return {'signatures': [], 'status': 'error', 'reasonCode': 500, 'reasonText': f'Signing failed: {e}'}
-        finally:
-            # Always free Windows contexts to prevent memory leaks
-            for c in raw_certs:
-                mscapi.free_windows_certificate(c['windows_ctx'])
+            return _SIGN[name](contents, hash_algorithm, signer_cert_der, ui_provider)
+        except backends.BackendUnavailable:
+            continue
+    return {'signatures': [], 'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.no-card-found')}
 
-    # PATH B: PKCS#11 Hardware Middleware (Default)
-    else:
-        lib_path = detector.auto_detect_library()
-        if not lib_path:
-            return {'signatures': [], 'status': 'error', 'reasonCode': 400, 'reasonText': 'No supported smart cards detected'}
-            
-        try:
-            funcs = hardware.load_pkcs11(lib_path)
-        except Exception as e:
-            return {'signatures': [], 'status': 'error', 'reasonCode': 500, 'reasonText': f'Failed to load PKCS11 driver: {e}'}
 
-        slots = hardware.get_slots(funcs, token_present=True)
-        target_slot = None
-        target_cert_id = None
-        target_pin = None
-
-        # Prompt user for PIN to search card (Required for some PKCS11 tokens to expose certs)
+def _sign_cng(contents, hash_algorithm, signer_cert_der, ui_provider):
+    if sys.platform != 'win32':
+        raise backends.BackendUnavailable('CNG is Windows-only')
+    import mscapi as mscapi
+    raw_certs = mscapi.get_windows_certificates()
+    try:
+        target_ctx = next((c['windows_ctx'] for c in raw_certs if c['der'] == signer_cert_der), None)
+        if not target_ctx:
+            return {'signatures': [], 'status': 'error', 'reasonCode': 404,
+                    'reasonText': reason('error.token-not-found')}
         pin = ui_provider.prompt_pin()
         if not pin:
-            return {'signatures': [], 'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN required'}
-
-        for slot_id in slots:
-            try:
-                certs = hardware.get_certificates(funcs, slot_id, pin)
-                for c in certs:
-                    if c['der'] == signer_cert_der:
-                        target_slot = slot_id
-                        target_cert_id = c['id']
-                        target_pin = pin
-                        break
-                if target_slot is not None:
-                    break
-            except Exception:
-                continue
-
-        if target_slot is None:
-            return {'signatures': [], 'status': 'error', 'reasonCode': 404, 'reasonText': 'Requested signing certificate not found on smart card'}
-
-        # Perform PKCS#11 signing
-        generated_signatures = []
+            return {'signatures': [], 'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
+        sigs = []
         for payload_b64 in contents:
-            try:
-                payload_bytes = base64.b64decode(payload_b64)
-                sig = hardware.sign_payload(
-                    funcs=funcs,
-                    slot_id=target_slot,
-                    pin=target_pin,
-                    payload=payload_bytes,
-                    key_id=target_cert_id
-                )
-                generated_signatures.append(base64.b64encode(sig).decode('utf-8'))
-            except Exception as e:
-                return {'signatures': [], 'status': 'error', 'reasonCode': 500, 'reasonText': f'Signing failed: {e}'}
+            sig = mscapi.sign_payload_windows(cert_ctx_pointer=target_ctx,
+                                              payload=base64.b64decode(payload_b64),
+                                              pin=pin, hash_alg=hash_algorithm)
+            sigs.append(base64.b64encode(sig).decode('utf-8'))
+        return {'signatures': sigs, 'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success')}
+    except Exception as e:
+        return {'signatures': [], 'status': 'error', 'reasonCode': 500, 'reasonText': f'Signing failed: {e}'}
+    finally:
+        for c in raw_certs:
+            mscapi.free_windows_certificate(c['windows_ctx'])
 
-        return {'signatures': generated_signatures, 'status': 'ok', 'reasonCode': 200, 'reasonText': 'Success'}
+
+def _sign_pkcs11(contents, hash_algorithm, signer_cert_der, ui_provider):
+    lib_path = detector.auto_detect_library()
+    if not lib_path:
+        raise backends.BackendUnavailable('No PKCS#11 library for the detected card')
+    try:
+        funcs = hardware.load_pkcs11(lib_path)
+    except Exception as e:
+        return {'signatures': [], 'status': 'error', 'reasonCode': 500, 'reasonText': f'Failed to load PKCS11 driver: {e}'}
+
+    slots = hardware.get_slots(funcs, token_present=True)
+    pin = ui_provider.prompt_pin()
+    if not pin:
+        return {'signatures': [], 'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
+
+    target_slot = target_cert_id = None
+    for slot_id in slots:
+        try:
+            for c in hardware.get_certificates(funcs, slot_id, pin):
+                if c['der'] == signer_cert_der:
+                    target_slot, target_cert_id = slot_id, c['id']
+                    break
+            if target_slot is not None:
+                break
+        except Exception:
+            continue
+
+    if target_slot is None:
+        return {'signatures': [], 'status': 'error', 'reasonCode': 404, 'reasonText': reason('error.token-not-found')}
+
+    sigs = []
+    for payload_b64 in contents:
+        try:
+            sig = hardware.sign_payload(funcs=funcs, slot_id=target_slot, pin=pin,
+                                        payload=base64.b64decode(payload_b64), key_id=target_cert_id)
+            sigs.append(base64.b64encode(sig).decode('utf-8'))
+        except Exception as e:
+            return {'signatures': [], 'status': 'error', 'reasonCode': 500, 'reasonText': f'Signing failed: {e}'}
+    return {'signatures': sigs, 'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success')}
+
+
+def _sign_apdu(contents, hash_algorithm, signer_cert_der, ui_provider):
+    ''' Raw-APDU signing, not yet enabled '''
+    
+    raise backends.BackendUnavailable('APDU signing pending real-card validation')
+
+
+_SIGN = {'cng': _sign_cng, 'pkcs11': _sign_pkcs11, 'apdu': _sign_apdu}
 
 
 def serve(https: bool = True):
