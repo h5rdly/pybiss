@@ -31,14 +31,16 @@ def detect_system_theme():
 
         if sys.platform == 'darwin':
             out = subprocess.run(['defaults', 'read', '-g', 'AppleInterfaceStyle'],
-                                 capture_output=True, text=True)
+                                 capture_output=True, text=True, timeout=2)
             # The key only exists in Dark mode; absent (empty) means Light.
             return 'dark' if out.stdout.strip() == 'Dark' else 'light'
 
-        # Linux / BSD via the freedesktop / GNOME setting
+        # Linux / BSD via the freedesktop / GNOME setting. The timeout is
+        # load-bearing: with a DISPLAY but no session bus (Xvfb on CI),
+        # gsettings can block forever on D-Bus autolaunch.
         out = subprocess.run(
             ['gsettings', 'get', 'org.gnome.desktop.interface', 'color-scheme'],
-            capture_output=True, text=True)
+            capture_output=True, text=True, timeout=2)
         val = out.stdout.strip().strip("'").lower()
         if not val:
             return None

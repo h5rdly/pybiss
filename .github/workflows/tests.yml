@@ -37,12 +37,17 @@ jobs:
 
       - name: Run tests
         if: runner.os != 'Linux'
-        run: python -m unittest discover tests
+        timeout-minutes: 10
+        run: python -X faulthandler -m unittest discover tests
 
-      # Xvfb gives the GUI tests a display; without it they skip silently
+      # Xvfb gives the GUI tests a display; without it they skip silently.
+      # The watchdog turns a hang into a diagnosis: on timeout, SIGABRT +
+      # faulthandler dump every thread's traceback into the log instead of
+      # the job spinning until the 6h job limit.
       - name: Run tests (under Xvfb)
         if: runner.os == 'Linux'
-        run: xvfb-run -a python -m unittest discover tests
+        timeout-minutes: 10
+        run: timeout -s ABRT 480 xvfb-run -a python -X faulthandler -m unittest discover tests
 
   # Alpine Linux (Musl) 
   test-alpine:
@@ -73,7 +78,14 @@ jobs:
           usesh: true
           # dejavu because Tk's Xft text rendering needs at least one real font.
           prepare: pkg install -y python314 py314-tkinter pcsc-lite xorg-vfbserver dejavu
+          # Xvfb must not inherit the SSH session's stdout/stderr and must be
+          # killed afterwards, or the backgrounded child keeps the session
+          # open and the step hangs forever AFTER the tests pass.
           run: |
-            Xvfb :99 -screen 0 1280x800x24 &
+            Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
+            XVFB_PID=$!
             sleep 2
             DISPLAY=:99 python3.14 -m unittest discover tests
+            rc=$?
+            kill $XVFB_PID 2>/dev/null
+            exit $rc

@@ -529,7 +529,16 @@ class TestMessageBoxGrabLifecycle(TkTestCase):
         the default root - which in this suite is TkTestCase's Window. The
         driver below leans on that (and documents it). '''
 
+    def setUp(self):
+        self._after_ids = []
+
     def tearDown(self):
+        # The retry loops below reschedule themselves
+        for aid in self._after_ids:
+            try:
+                self.root.after_cancel(aid)
+            except tk.TclError:
+                pass
         for w in list(self.root.winfo_children()):
             if isinstance(w, tk.Toplevel) and w.winfo_exists():
                 w.grab_release()
@@ -541,11 +550,11 @@ class TestMessageBoxGrabLifecycle(TkTestCase):
             dlgs = [w for w in self.root.winfo_children()
                     if isinstance(w, tk.Toplevel) and w.winfo_exists()]
             if not dlgs:
-                self.root.after(50, run)
+                self._after_ids.append(self.root.after(50, run))
                 return
             dlgs[-1].destroy()
             closed.append(1)
-        self.root.after(150, run)
+        self._after_ids.append(self.root.after(150, run))
 
     def test_askyesno_defaults_false_when_closed_and_releases_grab(self):
         from src.tkinter_mods import MessageBox
@@ -579,10 +588,10 @@ class TestMessageBoxGrabLifecycle(TkTestCase):
             dlgs = [w for w in self.root.winfo_children()
                     if isinstance(w, tk.Toplevel) and w.winfo_exists()]
             if not dlgs:
-                self.root.after(50, run)
+                self._after_ids.append(self.root.after(50, run))
                 return
             probe(dlgs[-1])
-        self.root.after(150, run)
+        self._after_ids.append(self.root.after(150, run))
 
         MessageBox.showinfo('Info', 'scaled?')
         self.assertEqual(seen.get('ui_scale'), self.root.ui_scale)
