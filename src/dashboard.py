@@ -3,19 +3,18 @@ from tkinter import filedialog
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from tkinter_mods import (
-    Theme, Window, Button, Frame, Scrollbar, MessageBox, Toggle, Label, 
-    set_dark_titlebar, Toplevel, Textbox, Listbox, Entry
-)
+import detector 
+import hardware
 
 from config import config
 from i18n import _
 from app import app as api_server
 
-# The core engine
-import detector as detector
-import hardware as hardware
-from ui_bridge import ui_task_queue, set_gui_active
+from src.tkinter_mods import (
+    Theme, Window, Button, Frame, Scrollbar, MessageBox, Toggle, Label, 
+    set_dark_titlebar, Toplevel, Textbox, Listbox, Entry
+)
+from src.ui_bridge import ui_task_queue, set_gui_active
 
 
 class DesktopDashboard(Window):
@@ -61,11 +60,21 @@ class DesktopDashboard(Window):
         self._monitor_ui_queue()
 
 
+    def destroy(self):
+        ''' The GUI is the queue's only consumer: the flag must not outlive it '''
+        set_gui_active(False)
+        super().destroy()
+
+
     def _monitor_ui_queue(self):
+
+        # NOTE: the proxy side times out (promptTimeoutSeconds) and gives up on
+        # its res_q; a task can therefore render a prompt whose requester is
+        # already gone. The answer lands in a queue nobody reads - by design
 
         try:
             task_type, kwargs, result_queue = ui_task_queue.get_nowait()
-            
+
             if task_type == 'prompt_pin':
                 res = self.ui_renderer.prompt_pin(**kwargs)
                 result_queue.put(res)
@@ -207,38 +216,44 @@ class DesktopDashboard(Window):
         Button(cert_frame, 'Import Certificate', self._ui_import_cert, width=160, fg_color=Theme.SURFACE).pack(side='left')
 
 
+    def _load_card(self):
+        ''' Loads the PKCS#11 library and returns (funcs, first_slot_id) '''
+
+        lib_path = config.get('pkcs11Path') or hardware.LIBCVP11_PATH
+        funcs = hardware.load_pkcs11(lib_path)
+        slots = hardware.get_slots(funcs, token_present=True)
+        if not slots:
+            raise Exception('No token present in the reader')
+        return funcs, slots[0]
+
+
     def _ui_change_pin(self):
-        
-        old_pin = get_ui_provider().prompt_pin() # Borrowing the existing modal
+
+        # ModalRenderer runs on the Tk main thread; get_ui_provider()'s proxy
+        # would deadlock it (it waits on the queue this thread must pump).
+        old_pin = self.ui_renderer.prompt_pin(label='current PIN')
         if not old_pin: return
-        
-        # In a full implementation, you'd want a specific "Enter New PIN" modal here
-        new_pin = get_ui_provider().prompt_pin() 
+        new_pin = self.ui_renderer.prompt_pin(label='new PIN')
         if not new_pin: return
 
         try:
-            lib_path = config.get('pkcs11Path') or hardware.LIBCVP11_PATH
-            funcs = hardware.load_pkcs11(lib_path)
-            hardware.change_card_pin(funcs, slot_id=1, old_pin=old_pin, new_pin=new_pin)
+            funcs, slot = self._load_card()
+            hardware.change_card_pin(funcs, slot_id=slot, old_pin=old_pin, new_pin=new_pin)
             MessageBox.showinfo("Success", "PIN successfully changed.")
         except Exception as e:
             MessageBox.showinfo("Error", f"Failed to change PIN: {e}")
 
 
     def _ui_unblock_pin(self):
-        
-        # d build a custom ThreeFieldsPIN modal in tkinter_mods.py
-        # To mimic Java's ThreeFieldsPINController exactly: PUK, New PIN, Confirm New PIN.
-        puk = get_ui_provider().prompt_pin() # Pretending this asks for PUK
+
+        puk = self.ui_renderer.prompt_pin(label='PUK')
         if not puk: return
-        
-        new_pin = get_ui_provider().prompt_pin() 
+        new_pin = self.ui_renderer.prompt_pin(label='new PIN')
         if not new_pin: return
 
         try:
-            lib_path = config.get('pkcs11Path') or hardware.LIBCVP11_PATH
-            funcs = hardware.load_pkcs11(lib_path)
-            hardware.unblock_card_pin(funcs, slot_id=1, puk=puk, new_pin=new_pin)
+            funcs, slot = self._load_card()
+            hardware.unblock_card_pin(funcs, slot_id=slot, puk=puk, new_pin=new_pin)
             MessageBox.showinfo("Success", "Card unblocked successfully.")
         except Exception as e:
             MessageBox.showinfo("Error", f"Failed to unblock card: {e}")
@@ -253,22 +268,20 @@ class DesktopDashboard(Window):
         )
         if not filepath: return
         
-        from src.server_ui import get_ui_provider
-        pin = get_ui_provider().prompt_pin()
+        pin = self.ui_renderer.prompt_pin()
         if not pin: return
-        
+
         try:
             with open(filepath, 'rb') as f:
                 cert_data = f.read()
-                
-            # Strip PEM headers if the user accidentally selected a PEM file
-            if b'-----BEGIN' in cert_data:
-                import src.crypto_parsing as cp
-                cert_data = cp.decode_key_bytes(cert_data)
 
-            lib_path = config.get('pkcs11Path') or hardware.LIBCVP11_PATH
-            funcs = hardware.load_pkcs11(lib_path)
-            hardware.write_certificate(funcs, slot_id=1, pin=pin, cert_der=cert_data)
+            # Strip PEM headers if the user selected a PEM file
+            if b'-----BEGIN' in cert_data:
+                from cert_parser import pem_to_der
+                cert_data = pem_to_der(cert_data)[0]
+
+            funcs, slot = self._load_card()
+            hardware.write_certificate(funcs, slot_id=slot, pin=pin, cert_der=cert_data)
             MessageBox.showinfo("Success", "Certificate imported to smart card.")
         except Exception as e:
             MessageBox.showinfo("Error", f"Import failed: {e}")
@@ -430,11 +443,8 @@ class DesktopDashboard(Window):
             self.log_to_dashboard(f'    - {r}')
             
         try:
-            # Load the library first
-            lib_path = config.get('pkcs11Path') or hardware.LIBCVP11_PATH
-            funcs = hardware.load_pkcs11(lib_path)
-            
-            serial = hardware.get_token_serial_number(funcs, slot_id=1)
+            funcs, slot = self._load_card()
+            serial = hardware.get_token_serial_number(funcs, slot_id=slot)
             self.log_to_dashboard(f'[+] Card Serial Number: {serial}')
             self.status_var.set(_('status_connected'))
         except Exception as e:
@@ -442,24 +452,19 @@ class DesktopDashboard(Window):
             self.status_var.set(_('status_error'))
 
     def read_certs(self):
-        from src.server_ui import get_ui_provider
-        
         self.output_text.delete('1.0', 'end')
         self.log_to_dashboard('[*] Attempting to read certificates from card...')
         self.update_idletasks()
-        
-        # Use the Server UI's modal to ask for a a PIN to read private certificate objects
-        pin_modal = get_ui_provider()
-        pin = pin_modal.prompt_pin()
+
+        # ModalRenderer runs on this (main) thread; ask for the PIN directly
+        pin = self.ui_renderer.prompt_pin()
         if not pin:
             self.log_to_dashboard('[-] PIN entry cancelled.')
             return
 
         try:
-            lib_path = config.get('pkcs11Path') or hardware.LIBCVP11_PATH
-            funcs = hardware.load_pkcs11(lib_path)
-            
-            certs = hardware.get_certificates(funcs, slot_id=1, pin=pin)
+            funcs, slot = self._load_card()
+            certs = hardware.get_certificates(funcs, slot_id=slot, pin=pin)
             if not certs:
                 self.log_to_dashboard('[-] No certificates found on card.')
                 return
@@ -473,28 +478,6 @@ class DesktopDashboard(Window):
                 
         except Exception as e:
             self.log_to_dashboard(f'[-] Failed to read certificates: {e}')
-
-
-class ThreadSafeUIProxy:
-    ''' 
-    Used by the background server. Instead of creating windows, 
-    it drops a task into the queue and waits for the Main Thread to reply.
-    '''
-
-    def prompt_pin(self, attempt: int = 1, label: str = 'PIN') -> str:
-        res_q = queue.Queue()
-        ui_task_queue.put(('prompt_pin', {'attempt': attempt, 'label': label}, res_q))
-        return res_q.get()
-
-    def choose_certificate(self, certs: list[dict]) -> int:
-        res_q = queue.Queue()
-        ui_task_queue.put(('choose_certificate', {'certs': certs}, res_q))
-        return res_q.get()
-
-    def confirm_sign(self, text: str, additional_text: str = None) -> bool:
-        res_q = queue.Queue()
-        ui_task_queue.put(('confirm_sign', {'text': text, 'additional_text': additional_text}, res_q))
-        return res_q.get()
 
 
 class ModalRenderer:
@@ -513,7 +496,7 @@ class ModalRenderer:
         
         Label(dialog, text=msg, fg=color).pack(pady=(25, 10))
         
-        entry = Entry(dialog, width=220, height=38, show='*')
+        entry = Entry(dialog, width=220, height=38, show='*', placeholder=f'Enter {label}')
         entry.pack(pady=10)
         
         def on_ok(event=None):
@@ -610,9 +593,9 @@ class ModalRenderer:
         btn_frame.pack(pady=15)
         
         # Grab focus to the "Authorize" button by default
-        btn_yes = Button(btn_frame, 'Authorize', on_yes, bg_color='#2FA572', hover_color='#106A43', width=130)
+        btn_yes = Button(btn_frame, 'Authorize', on_yes, fg_color='#2FA572', hover_color='#106A43', width=130)
         btn_yes.pack(side='left', padx=10)
-        Button(btn_frame, 'Reject', on_no, bg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, width=130).pack(side='right', padx=10)
+        Button(btn_frame, 'Reject', on_no, fg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, width=130).pack(side='right', padx=10)
         
         # Pressing Enter hits 'Authorize'
         dialog.bind('<Return>', lambda e: on_yes())

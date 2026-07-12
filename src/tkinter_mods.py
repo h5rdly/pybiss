@@ -1,4 +1,9 @@
-import sys, tkinter as tk
+import logging, os, sys, tkinter as tk
+
+if sys.platform.startswith('win'):
+    import winreg
+else:
+    import subprocess
 
 
 class Theme:
@@ -11,6 +16,132 @@ class Theme:
     DANGER = '#E74C3C'      # Reject Button
     DANGER_HOVER = '#C0392B'
     FONT = ('Segoe UI', 12)
+
+
+def detect_system_theme():
+    ''' Returns 'dark', 'light', or None (unknown) '''
+
+    try:
+        if sys.platform.startswith('win'):
+            key = winreg.OpenKey(
+                winreg.HKEY_CURRENT_USER,
+                r'Software\Microsoft\Windows\CurrentVersion\Themes\Personalize')
+            apps_use_light, _ = winreg.QueryValueEx(key, 'AppsUseLightTheme')
+            return 'light' if apps_use_light else 'dark'
+
+        if sys.platform == 'darwin':
+            out = subprocess.run(['defaults', 'read', '-g', 'AppleInterfaceStyle'],
+                                 capture_output=True, text=True)
+            # The key only exists in Dark mode; absent (empty) means Light.
+            return 'dark' if out.stdout.strip() == 'Dark' else 'light'
+
+        # Linux / BSD via the freedesktop / GNOME setting
+        out = subprocess.run(
+            ['gsettings', 'get', 'org.gnome.desktop.interface', 'color-scheme'],
+            capture_output=True, text=True)
+        val = out.stdout.strip().strip("'").lower()
+        if not val:
+            return None
+        return 'dark' if 'dark' in val else 'light'
+    except Exception:
+        return None
+
+
+def _even(n) -> int:
+    ''' Floor to the nearest even integer - keeps rounded corners symmetric '''
+    return (int(n) // 2) * 2
+
+
+def scrollbar_thumb_bounds(start: float, end: float, height: float, min_px: int = 10):
+    ''' Pixel (y1, y2) bounds of a scrollbar thumb, enforcing a minimum size while
+        preserving the proportional start<->end mapping
+    '''
+
+    length = (end - start) * height
+    if length < min_px and (height - length) != 0:
+        factor = (min_px - length) / (height - length)
+        start = start - start * factor
+        end = end + (1 - end) * factor
+
+    return start * height, end * height
+
+
+def scrollbar_drag_start(cursor_frac: float, grab_offset: float, thumb_len: float) -> float:
+    '''
+    New thumb start fraction for a drag that keeps the grabbed point under the
+    cursor (rather than snapping the thumb's centre to it), clamped to the track.
+    '''
+
+    return max(0.0, min(1.0 - thumb_len, cursor_frac - grab_offset))
+
+
+# --- Per-monitor DPI ---
+
+_BASE_DPI = 96                 # 96 dpi == 100% scaling
+_MDT_EFFECTIVE_DPI = 0         # the value the user set in display settings
+_MONITOR_DEFAULTTONEAREST = 2
+
+
+def get_window_dpi_scale(window) -> float:
+    ''' DPI scale factor (1.0 = 100%) of the monitor `window` currently sits on '''
+
+    if sys.platform == 'win32':
+        try:
+            import ctypes
+            from ctypes import wintypes, byref
+            # winfo_id() returns the client child HWND; MonitorFromWindow is
+            # fine with that - both live on the same monitor.
+            hwnd = wintypes.HWND(window.winfo_id())
+            hmon = ctypes.windll.user32.MonitorFromWindow(
+                hwnd, wintypes.DWORD(_MONITOR_DEFAULTTONEAREST))
+            x_dpi, y_dpi = wintypes.UINT(), wintypes.UINT()
+            if ctypes.windll.shcore.GetDpiForMonitor(
+                    hmon, _MDT_EFFECTIVE_DPI, byref(x_dpi), byref(y_dpi)) == 0:
+                return (x_dpi.value + y_dpi.value) / (2 * _BASE_DPI)
+        except (OSError, AttributeError):
+            pass  # < Windows 8.1 or shcore missing
+        return 1.0
+
+    elif sys.platform == 'darwin':
+        return 1.0  # Quartz scales Tk windows automatically on Retina
+
+    else:
+        # X11 has no per-monitor DPI API (Wayland compositors scale natively)
+        try:
+            return window.tk.call('tk', 'scaling') / (_BASE_DPI / 72)
+        except Exception:
+            return 1.0
+
+
+class DpiTracker:
+    ''' Polling instead of WM_DPICHANGED because Tk owns the window procedure and tkinter 
+        exposes no hook for raw Windows messages. The probe is injectable for tests
+    '''
+
+    poll_interval = 400       # ms between checks
+    settle_interval = 1500    # ms pause after a change (user may still be dragging)
+
+    def __init__(self, window, on_change, probe=get_window_dpi_scale):
+        self.window = window
+        self.on_change = on_change
+        self.probe = probe
+        self.scale = probe(window)
+        window.after(self.poll_interval, self._poll)
+
+    def _poll(self):
+        try:
+            if not self.window.winfo_exists():
+                return                            # window gone - let the loop die
+            delay = self.poll_interval
+            if self.window.state() != 'iconic':   # skip minimized windows
+                new = self.probe(self.window)
+                if abs(new - self.scale) > 0.01:
+                    old, self.scale = self.scale, new
+                    self.on_change(old, new)
+                    delay = self.settle_interval
+            self.window.after(delay, self._poll)
+        except tk.TclError:
+            return                                # interpreter shutting down
 
 
 def set_dark_titlebar(window):
@@ -27,6 +158,24 @@ def set_dark_titlebar(window):
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(value), 4)
         except Exception:
             pass
+
+
+def grab_when_viewable(window, attempts=40):
+    ''' Take the modal grab as soon as the server will allow it. Strict X11 refuses grabs 
+        on unmapped windows, and blocking on wait_visibility() can hang forever - a transient 
+        of a hidden master may never map at all
+    '''
+
+    try:
+        if not window.winfo_exists():
+            return
+        window.grab_set()
+    except tk.TclError:
+        if attempts > 0:
+            try:
+                window.after(25, lambda: grab_when_viewable(window, attempts - 1))
+            except tk.TclError:
+                pass    # window torn down between the check and the reschedule
 
 
 def draw_rounded_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
@@ -79,7 +228,18 @@ class Window(tk.Tk):
         
         # Apply Windows Dark Titlebar
         set_dark_titlebar(self)
-        
+
+        # Transparent 1x1 pixel for icon
+        self._blank_icon = tk.PhotoImage(width=1, height=1)
+        self.iconphoto(True, self._blank_icon)
+
+        # Per-monitor DPI. Point-based fonts already carry the PRIMARY monitor's factor
+        # via Tk's own 'tk scaling', so fonts only need the ratio current/startup
+        self._startup_dpi_scale = get_window_dpi_scale(self) or 1.0
+        self._dpi_scale = self._startup_dpi_scale
+        width = int(width * self._dpi_scale)
+        height = int(height * self._dpi_scale)
+
         # Center the window perfectly based on the new DPI-aware dimensions
         self.geometry(f'{width}x{height}')
         self.update_idletasks()
@@ -87,7 +247,7 @@ class Window(tk.Tk):
         y = (self.winfo_screenheight() // 2) - (height // 2)
         self.geometry(f'+{x}+{y}')
 
-        # Zooming/Scaling 
+        # Zooming/Scaling
         self.zoom_level = 12 # Default baseline font size
         self._zoom_timer = None # Debounce timer
         
@@ -100,6 +260,37 @@ class Window(tk.Tk):
         # macOS/Linux specific scroll bindings
         self.bind('<Control-Button-4>', self._zoom_in)
         self.bind('<Control-Button-5>', self._zoom_out)
+
+        # Re-scale when dragged onto a monitor with a different DPI
+        DpiTracker(self, self._on_dpi_change)
+
+    def _on_dpi_change(self, old: float, new: float):
+        self._dpi_scale = new
+        # Keep the same physical size on the new monitor
+        w = int(self.winfo_width() * new / old)
+        h = int(self.winfo_height() * new / old)
+        try:
+            self.attributes('-alpha', 0.2)   # mask the mid-resize flicker
+        except Exception:
+            pass
+        self.geometry(f'{w}x{h}')
+        self._apply_zoom(self)               # re-scale fonts + canvas widgets
+        self.after(80, lambda: self._safe_alpha(1.0))
+
+    def _safe_alpha(self, value):
+        try:
+            self.attributes('-alpha', value)
+        except Exception:
+            pass
+
+
+    def report_callback_exception(self, exc_type, exc_value, exc_tb):
+        ''' Tk's default prints callback tracebacks to stderr. Route them into pybiss.log 
+            instead so the next one surfaces in the dashboard's own Logs tab.
+        '''
+
+        logging.error('Swallowed Tk callback exception',
+                      exc_info=(exc_type, exc_value, exc_tb))
 
 
     def mainloop(self, *args, **kwargs):
@@ -148,9 +339,30 @@ class Window(tk.Tk):
 
     @property
     def ui_scale(self):
-        ''' Convert the baseline font size (12) into a layout multiplier (e.g. 1.5x) '''
-        
-        return self.zoom_level / 12.0
+        ''' Layout multiplier for canvas pixel geometry: the user's zoom (Ctrl+scroll)
+            times the current monitor's absolute DPI factor. Canvas widgets draw in
+            raw pixels, so they need the absolute factor.
+        '''
+        return (self.zoom_level / 12.0) * getattr(self, '_dpi_scale', 1.0)
+
+
+    @property
+    def _dpi_font_ratio(self):
+        ''' DPI-only multiplier for an already point-sized font, e.g. _apply_zoom, where 
+            the size is `zoom_level`. Just the ratio vs startup
+        '''
+        startup = getattr(self, '_startup_dpi_scale', 1.0) or 1.0
+        return getattr(self, '_dpi_scale', 1.0) / startup
+
+
+    @property
+    def font_scale(self):
+        ''' Multiplier for a fixed-base widget font (e.g. Button's 11pt). Using `ui_scale` 
+            for a font double-scales on any display above 100% - Tk already point-scales it once
+        '''
+        startup = getattr(self, '_startup_dpi_scale', 1.0) or 1.0
+        dpi_ratio = getattr(self, '_dpi_scale', 1.0) / startup
+        return (self.zoom_level / 12.0) * dpi_ratio
 
 
     def _apply_zoom(self, widget):
@@ -161,11 +373,12 @@ class Window(tk.Tk):
             current_font = widget.cget("font")
             if current_font:
                 # If it's a string font (e.g. "Consolas 10"), split it
+                fs = self._dpi_font_ratio
                 if isinstance(current_font, str):
                     parts = current_font.split()
                     family = parts[0]
                     # Update to our new zoom level
-                    widget.configure(font=(family, self.zoom_level))
+                    widget.configure(font=(family, int(self.zoom_level * fs)))
                 # If it's a tuple font (e.g. ('Segoe UI', 12, 'bold'))
                 elif isinstance(current_font, tuple):
                     family = current_font[0]
@@ -173,12 +386,14 @@ class Window(tk.Tk):
 
                     # keep headers proportionally larger
                     if len(current_font) > 1 and int(current_font[1]) >= 18:
-                        widget.configure(font=(family, self.zoom_level + 8, *modifiers))
+                        widget.configure(font=(family, int((self.zoom_level + 8) * fs), *modifiers))
                     else:
-                        widget.configure(font=(family, self.zoom_level, *modifiers))
+                        widget.configure(font=(family, int(self.zoom_level * fs), *modifiers))
         
-        except Exception:
-            pass # Widget doesn't support font attribute (like a raw Frame)
+        except (tk.TclError, ValueError):
+            # TclError: widget has no font attribute (raw Frame/Canvas);
+            # ValueError: non-numeric size slot in an exotic font tuple.
+            pass
 
         # Recursively apply to all children
         for child in widget.winfo_children():
@@ -197,21 +412,18 @@ class MessageBox:
         dialog.title(title)
         dialog.configure(bg=Theme.BG)
         
-        # Apply the dark titlebar hack!
         set_dark_titlebar(dialog)
         
+        # Inherit UI scale from the app root - dialog is masterless, so .master 
+        # is the default root. 
+        dialog.ui_scale = getattr(dialog.master, 'ui_scale', 1.0)
+
         # Center the dialog
-        width, height = 400, 200
-        dialog.update_idletasks()
+        width, height = int(400 * dialog.ui_scale), int(200 * dialog.ui_scale)
         x = (dialog.winfo_screenwidth() // 2) - (width // 2)
         y = (dialog.winfo_screenheight() // 2) - (height // 2)
         dialog.geometry(f'{width}x{height}+{x}+{y}')
-        
-        # Make it modal
-        dialog.transient()
-        dialog.grab_set()
-        dialog.attributes('-topmost', True)
-        
+
         # Message Label
         tk.Label(dialog, text=message, bg=Theme.BG, fg=Theme.TEXT, 
                  font=('Segoe UI', 12), wraplength=350, justify='center').pack(expand=True, fill='both', padx=20, pady=20)
@@ -229,9 +441,14 @@ class MessageBox:
                 
             bg_col = Theme.PRIMARY if is_primary else Theme.BG
             hov_col = Theme.HOVER if is_primary else Theme.BORDER
-            Button(btn_frame, text=btn_text, command=on_click, width=100, 
+            Button(btn_frame, text=btn_text, command=on_click, width=100,
                          fg_color=bg_col, hover_color=hov_col).pack(side='left', padx=10)
-            
+
+        # Make it modal - grab only once the server allows it (grabbing an nmapped toplevel 
+        # races the WM and raises on strict X11). 
+        dialog.attributes('-topmost', True)
+        grab_when_viewable(dialog)
+
         dialog.wait_window()
         return result['value']
 
@@ -255,6 +472,7 @@ class Scrollbar(tk.Canvas):
         self.command = command
         self.start_val = 0.0
         self.end_val = 1.0
+        self._grab_offset = 0.0
         self.bind('<Configure>', lambda e: self._draw())
         self.bind('<B1-Motion>', self._on_drag)
         self.bind('<Button-1>', self._on_click)
@@ -270,25 +488,30 @@ class Scrollbar(tk.Canvas):
     def _draw(self):
 
         self.delete('all')
-        h = self.winfo_height()
-        w = self.winfo_width()
-        y1, y2 = self.start_val * h, self.end_val * h
-        if y2 - y1 < 10: y2 = y1 + 10 # Enforce a minimum thumb size
-        
-        # Draw the rounded track thumb!
+        h = _even(self.winfo_height())
+        w = _even(self.winfo_width())
+        y1, y2 = scrollbar_thumb_bounds(self.start_val, self.end_val, h)
+
         draw_rounded_rect(self, 2, y1+2, w-2, y2-2, (w-4)/2, fill=Theme.BORDER, outline='')
 
     def _on_click(self, event):
-        self._move_to(event.y)
+        h = self.winfo_height() or 1
+        y1, y2 = scrollbar_thumb_bounds(self.start_val, self.end_val, h)
+        frac = event.y / h
+        if y1 <= event.y <= y2:
+            # Grab the thumb: keep the grabbed point under the cursor while dragging
+            self._grab_offset = frac - self.start_val
+        else:
+            # Click on the track: page-jump, centring the thumb on the cursor
+            self._grab_offset = (self.end_val - self.start_val) / 2
+        self._apply_drag(event.y)
 
     def _on_drag(self, event):
-        self._move_to(event.y)
+        self._apply_drag(event.y)
 
-    def _move_to(self, y):
-        h = self.winfo_height()
-        thumb_h = (self.end_val - self.start_val) * h
-        new_start = (y - thumb_h / 2) / h
-        new_start = max(0.0, min(1.0 - (self.end_val - self.start_val), new_start))
+    def _apply_drag(self, y):
+        h = self.winfo_height() or 1
+        new_start = scrollbar_drag_start(y / h, self._grab_offset, self.end_val - self.start_val)
         self.command('moveto', str(new_start))
 
 
@@ -298,6 +521,7 @@ class Button(tk.Canvas):
                  corner_radius=8, fg_color=Theme.PRIMARY, hover_color=Theme.HOVER):
         super().__init__(master, width=width, height=height, bg=Theme.BG, highlightthickness=0)
         self.command = command
+        self.text = text
         self.fg_color = fg_color
         self.hover_color = hover_color
         self.corner_radius = corner_radius
@@ -314,20 +538,22 @@ class Button(tk.Canvas):
     def _draw(self, event=None):
 
         self.delete('all')
-        w, h = self.winfo_width(), self.winfo_height()
-        
+        w, h = _even(self.winfo_width()), _even(self.winfo_height())
+
         # Skip drawing if window hasn't assigned layout dimensions yet
-        if w <= 1 or h <= 1: return 
+        if w <= 1 or h <= 1: return
         
-        s = self.winfo_toplevel().ui_scale
+        tl = self.winfo_toplevel()
+        # getattr fallbacks: a bare-toplevel host renders unscaled buttons
+        # instead of NO buttons (an AttributeError here is swallowed by Tk)
+        s = getattr(tl, 'ui_scale', 1.0)                  # geometry: absolute factor
+        fscale = getattr(tl, 'font_scale', s)             # font: zoom * DPI ratio
         radius = self.corner_radius * s
-        
+
         self.rect_id = draw_rounded_rect(self, 0, 0, w, h, radius, fill=self.fg_color)
-        
-        text_str = self.master.tk.call('set', 'text', self.winfo_id()) if not hasattr(self, 'text') else self.text
-        self.text_id = self.create_text(w/2, h/2, text=text_str, fill=Theme.TEXT, 
-                                        font=('Segoe UI', int(11*s), 'bold'))
-        self.text = self.itemcget(self.text_id, 'text')
+
+        self.text_id = self.create_text(w/2, h/2, text=self.text, fill=Theme.TEXT,
+                                        font=('Segoe UI', int(11*fscale), 'bold'))
 
 
     def _on_enter(self, event):
@@ -349,20 +575,44 @@ class Button(tk.Canvas):
 
 class Entry(tk.Frame):
 
-    def __init__(self, master, width=200, height=35, corner_radius=6, show=''):
+    def __init__(self, master, width=200, height=35, corner_radius=6, show='', placeholder=''):
         super().__init__(master, bg=Theme.BG)
         self.canvas = tk.Canvas(self, width=width, height=height, bg=Theme.BG, highlightthickness=0)
         self.canvas.pack(fill='both', expand=True)
-        
+
         # Draw Border
         draw_rounded_rect(self.canvas, 1, 1, width-1, height-1, corner_radius, fill=Theme.SURFACE, outline=Theme.BORDER, width=2)
-        
+
         # Inner native entry
-        self.entry = tk.Entry(self, bg=Theme.SURFACE, fg=Theme.TEXT, insertbackground='white', 
+        self.entry = tk.Entry(self, bg=Theme.SURFACE, fg=Theme.TEXT, insertbackground='white',
                               relief='flat', highlightthickness=0, font=Theme.FONT, show=show)
         self.entry.place(relx=0.05, rely=0.1, relwidth=0.9, relheight=0.8)
 
-    def get(self): return self.entry.get()
+        self._show = show
+        self._placeholder = placeholder
+        self._placeholder_active = False
+        if placeholder:
+            self.entry.bind('<FocusIn>', self._clear_placeholder)
+            self.entry.bind('<FocusOut>', self._restore_placeholder)
+            self._restore_placeholder()
+
+    def _clear_placeholder(self, event=None):
+        if self._placeholder_active:
+            self._placeholder_active = False
+            self.entry.delete(0, 'end')
+            self.entry.configure(fg=Theme.TEXT, show=self._show)
+
+    def _restore_placeholder(self, event=None):
+        if not self._placeholder or self.entry.get():
+            return
+        self._placeholder_active = True
+        self.entry.configure(show='', fg=Theme.BORDER)  # unmask so hint isn't asterisks
+        self.entry.delete(0, 'end')
+        self.entry.insert(0, self._placeholder)
+
+    def get(self):
+        return '' if self._placeholder_active else self.entry.get()
+
     def focus(self): self.entry.focus()
 
 
@@ -404,7 +654,7 @@ class Checkbox(tk.Frame):
     def _draw(self):
 
         self.canvas.delete("all")
-        s = self.winfo_toplevel().ui_scale 
+        s = getattr(self.winfo_toplevel(), 'ui_scale', 1.0)
         self.canvas.configure(width=24*s, height=24*s)
         
         if self.is_checked:
@@ -455,7 +705,7 @@ class Toggle(tk.Frame):
         self.canvas.delete("all")
         
         # Grab the current zoom multiplier from the main window
-        s = self.winfo_toplevel().ui_scale 
+        s = getattr(self.winfo_toplevel(), 'ui_scale', 1.0)
         
         # Dynamically scale the Canvas container
         self.canvas.configure(width=44*s, height=24*s)
@@ -485,37 +735,47 @@ class Toggle(tk.Frame):
 
 
 class Toplevel(tk.Toplevel):
-    ''' DPI-aware popup window that inherits scale from its master and prevents white-flash '''
-    
+    ''' DPI-aware popup window that inherits scale from its master and prevents white-flash
+        Pattern per stdlib tkinter.simpledialog: deiconify -> wait_visibility -> grab_set.
+    '''
+
     def __init__(self, master, title="Popup", width=400, height=300):
         super().__init__(master)
-        self.withdraw() # Prevent white flash
-        
+        self.withdraw() # Prevent white flash; stays hidden until show()
+
         self.title(title)
         self.configure(bg=Theme.BG)
+        # Windows-only DWM call; the HWND already exists while withdrawn, and
+        # styling it pre-reveal avoids a light->dark titlebar flicker.
         set_dark_titlebar(self)
-        
+
         # Inherit UI scale from the parent window
         self.ui_scale = getattr(master, 'ui_scale', 1.0)
         scaled_w = int(width * self.ui_scale)
         scaled_h = int(height * self.ui_scale)
-        
-        self.update_idletasks()
+
         x = (self.winfo_screenwidth() // 2) - (scaled_w // 2)
         y = (self.winfo_screenheight() // 2) - (scaled_h // 2)
         self.geometry(f'{scaled_w}x{scaled_h}+{x}+{y}')
-        
-        self.transient(master)
-        self.grab_set()
-        self.attributes('-topmost', True)
+
+        self.transient(master)  # WM hint only - safe while withdrawn
 
 
     def show(self):
-        ''' Applies zoom and reveals the window flawlessly '''
+        ''' Apply zoom, reveal, and take the modal grab once X11 allows it '''
 
         if hasattr(self.master, '_apply_zoom'):
             self.master._apply_zoom(self)
+        try:
+            # Many WMs never map a transient of an unmapped master - and the
+            # PIN dialog must still appear when the dashboard is hidden/tray.
+            if not self.master.winfo_viewable():
+                self.transient('')
+        except tk.TclError:
+            pass
         self.deiconify()
+        self.attributes('-topmost', True)
+        grab_when_viewable(self)
 
 
 class Textbox(Frame):
@@ -538,7 +798,8 @@ class Textbox(Frame):
     def _yview(self, *args): self.text.yview(*args)
     def insert(self, *args, **kwargs): self.text.insert(*args, **kwargs)
     def delete(self, *args, **kwargs): self.text.delete(*args, **kwargs)
-    def configure(self, *args, **kwargs): self.text.configure(*args, **kwargs)
+    def configure(self, *args, **kwargs): return self.text.configure(*args, **kwargs)
+    def cget(self, key): return self.text.cget(key)
     def see(self, *args, **kwargs): self.text.see(*args, **kwargs)
 
 
@@ -562,9 +823,16 @@ class Listbox(Frame):
     # Proxy methods to the native listbox widget
     def _yview(self, *args): self.listbox.yview(*args)
     def insert(self, *args, **kwargs): self.listbox.insert(*args, **kwargs)
+    def delete(self, *args, **kwargs): self.listbox.delete(*args, **kwargs)
+    def configure(self, *args, **kwargs): return self.listbox.configure(*args, **kwargs)
+    def cget(self, key): return self.listbox.cget(key)
     def curselection(self): return self.listbox.curselection()
     def selection_set(self, *args): self.listbox.selection_set(*args)
-    def bind(self, *args, **kwargs): self.listbox.bind(*args, **kwargs)
+    def bind(self, sequence=None, command=None, add=True):
+        # Force add=True: replacing bindings would silently kill internal callbacks
+        if not (add is True or add == '+'):
+            raise ValueError("Listbox.bind requires add=True (or '+') to preserve internal callbacks")
+        return self.listbox.bind(sequence, command, add=True)
     def focus_set(self): self.listbox.focus_set()
 
 

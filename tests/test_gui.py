@@ -1,0 +1,701 @@
+'''
+Tests for the tkinter layer: ui_bridge (headless), dashboard wiring (headless),
+tkinter_mods widgets and ModalRenderer dialogs (need a display - real, or Xvfb).
+
+Run on Linux CI with:  xvfb-run -a python -m unittest tests.test_gui
+Machines with no display skip the Tk-dependent classes automatically.
+'''
+
+import ast, locale, queue, sys, threading, time, unittest
+
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
+
+from src.dashboard import DesktopDashboard
+from src.ui_bridge import (
+    ThreadSafeUIProxy, CLIUserInterface, ui_task_queue, set_gui_active,
+    get_ui_provider, _GUI_IS_ACTIVE,
+)
+
+
+_SRC = __file__.replace('\\', '/').rsplit('/', 2)[0] + '/src'
+
+# Tk import can fail on minimal Pythons with no _tkinter
+try:
+    import tkinter as tk
+    from src.tkinter_mods import (
+        Window, Toplevel, Button, Entry, Toggle, Textbox, Listbox, Theme,
+    )
+    _TK_IMPORTABLE = True
+except Exception:
+    _TK_IMPORTABLE = False
+
+
+def _display_available() -> bool:
+    ''' True if a Tk root can actually be created (display server reachable) '''
+
+    if not _TK_IMPORTABLE:
+        return False
+    try:
+        probe = tk.Tk()
+        probe.destroy()
+        return True
+    except tk.TclError:
+        return False
+
+
+HAS_DISPLAY = _display_available()
+_needs_display = unittest.skipUnless(HAS_DISPLAY, 'no display server (run under xvfb-run on CI)')
+
+
+def find_widgets(root, cls) -> list:
+    ''' Recursively collect all widgets of a given class under `root` '''
+
+    found = [w for w in root.winfo_children() if isinstance(w, cls)]
+    for child in root.winfo_children():
+        found.extend(find_widgets(child, cls))
+    return found
+
+
+def find_by_attr(root, attr) -> list:
+    ''' Collect widgets that carry `attr` '''
+
+    found = [w for w in root.winfo_children() if hasattr(w, attr)]
+    for child in root.winfo_children():
+        found.extend(find_by_attr(child, attr))
+    return found
+
+
+class TestUiBridge(unittest.TestCase):
+    ''' Layer 1: the queue bridge - no display, runs on every CI platform '''
+
+    def tearDown(self):
+        # Never leak tasks into the next test
+        while not ui_task_queue.empty():
+            ui_task_queue.get_nowait()
+
+
+    def test_prompt_pin_roundtrip(self):
+        ''' A server thread's prompt blocks until the consumer answers, then unblocks '''
+
+        result = {}
+
+        def server_thread():
+            result['pin'] = ThreadSafeUIProxy().prompt_pin(label='PIN')
+
+        t = threading.Thread(target=server_thread, daemon=True)
+        t.start()
+
+        # Play the role of the dashboard's _monitor_ui_queue loop
+        task_type, kwargs, res_q = ui_task_queue.get(timeout=2)
+        self.assertEqual(task_type, 'prompt_pin')
+        self.assertEqual(kwargs['label'], 'PIN')
+        res_q.put('9999')
+
+        t.join(timeout=2)
+        self.assertFalse(t.is_alive(), 'proxy never unblocked after the answer')
+        self.assertEqual(result['pin'], '9999')
+
+
+    def test_confirm_sign_carries_both_texts(self):
+        threading.Thread(
+            target=lambda: ThreadSafeUIProxy().confirm_sign('msg', additional_text='extra'),
+            daemon=True,
+        ).start()
+        task_type, kwargs, res_q = ui_task_queue.get(timeout=2)
+        self.assertEqual(task_type, 'confirm_sign')
+        self.assertEqual(kwargs, {'text': 'msg', 'additional_text': 'extra'})
+        res_q.put(True)  # unblock the worker so it doesn't linger
+
+
+    def test_prompt_times_out_to_cancel_sentinels(self):
+        ''' The handlers run inline in the server's asyncio loop, an  unanswerable prompt 
+            must not block forever
+        '''
+
+        proxy = ThreadSafeUIProxy(timeout=0.05)
+        self.assertIsNone(proxy.prompt_pin())
+        self.assertEqual(proxy.choose_certificate([{'subject': 'A'}]), -1)
+        self.assertFalse(proxy.confirm_sign('sign this?'))
+
+    def test_late_answer_after_timeout_is_harmless(self):
+        ''' The stale task stays queued - an answer put after the requester gave
+            up lands in a queue nobody reads 
+        '''
+
+        proxy = ThreadSafeUIProxy(timeout=0.05)
+        self.assertIsNone(proxy.prompt_pin())
+        task_type, kwargs, res_q = ui_task_queue.get_nowait()
+        res_q.put('1234')               # the "user" answers too late: no error
+
+
+    def test_gui_flag_routes_provider(self):
+        ''' dashboard.destroy() flips the flag so new prompts route to the CLI fallback, 
+            not an undrained queue
+        '''
+
+        saved = _GUI_IS_ACTIVE
+        try:
+            set_gui_active(True)
+            self.assertIsInstance(get_ui_provider(), ThreadSafeUIProxy)
+            set_gui_active(False)
+            self.assertIsInstance(get_ui_provider(), CLIUserInterface)
+        finally:
+            set_gui_active(saved)
+
+
+@unittest.skipUnless(_TK_IMPORTABLE, 'dashboard module needs tkinter importable')
+class TestMonitorUiQueueLive(unittest.TestCase):
+    ''' _monitor_ui_queue() must route a queued task to the renderer and put the answer back. 
+        uses self.ui_renderer and self.after, no display or a real DesktopDashboard needed
+    '''
+
+    class _FakeDash:
+        class _Renderer:
+            def prompt_pin(self, attempt=1, label='PIN'): return '1234'
+            def choose_certificate(self, certs): return 1
+            def confirm_sign(self, text, additional_text=None): return True
+        ui_renderer = _Renderer()
+        rescheduled = False
+        _monitor_ui_queue = None   # looked up by the real method when it reschedules
+        def after(self, delay, cb): self.rescheduled = True
+
+
+    @staticmethod
+    def _dash_queue():
+        # The dual-module trap, queue edition: dashboard.py imports
+        # `ui_bridge` via its sys.path shim while this file imports
+        # `src.ui_bridge` - two module objects, two DIFFERENT queues. Tasks
+        # put on ours are invisible to _monitor_ui_queue, so drive the queue
+        # object in the dashboard's own namespace.
+        import src.dashboard
+        return src.dashboard.ui_task_queue
+
+    def tearDown(self):
+        q = self._dash_queue()
+        while not q.empty():
+            q.get_nowait()
+
+
+    def test_routes_pin_task_and_answers(self):
+
+        res_q = queue.Queue()
+        self._dash_queue().put(('prompt_pin', {'attempt': 1, 'label': 'PIN'}, res_q))
+        dash = self._FakeDash()
+        DesktopDashboard._monitor_ui_queue(dash)
+        self.assertEqual(res_q.get_nowait(), '1234')
+        self.assertTrue(dash.rescheduled, 'monitor loop must reschedule itself')
+
+
+    def test_empty_queue_is_not_an_error(self):
+
+        dash = self._FakeDash()
+        DesktopDashboard._monitor_ui_queue(dash)   # must not raise
+        self.assertTrue(dash.rescheduled)
+
+
+class TestDashboardWiring(unittest.TestCase):
+    ''' Dashboard wiring regression guards - pure source inspection, no display '''
+
+    @classmethod
+    def setUpClass(cls):
+        with open(_SRC + '/dashboard.py', encoding='utf-8') as fh:
+            cls.source = fh.read()
+        cls.tree = ast.parse(cls.source)
+
+
+    def _imported_modules(self):
+
+        mods = set()
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.Import):
+                mods.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                mods.add(node.module)
+        return mods
+
+
+    def test_no_dead_module_imports(self):
+        mods = self._imported_modules()
+        self.assertNotIn('crypto_parsing', mods)
+        self.assertNotIn('server_ui', mods)
+
+    def test_pem_conversion_uses_cert_parser(self):
+        self.assertIn('cert_parser', self._imported_modules())
+
+
+    def test_get_ui_provider_is_never_called(self):
+        called = [
+            n for n in ast.walk(self.tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+            and n.func.id == 'get_ui_provider'
+        ]
+        self.assertEqual(called, [], 'get_ui_provider() must not be called; use self.ui_renderer')
+
+
+    def test_no_hardcoded_slot_id_one(self):
+        bad = [
+            kw for n in ast.walk(self.tree) if isinstance(n, ast.Call)
+            for kw in n.keywords
+            if kw.arg == 'slot_id' and isinstance(kw.value, ast.Constant) and kw.value.value == 1
+        ]
+        self.assertEqual(bad, [], 'slot_id=1 hard-coding regressed; use hardware.get_slots(...)')
+
+
+    def test_admin_path_reads_slots_dynamically(self):
+        self.assertIn('get_slots', self.source)
+
+
+    def test_destroy_deactivates_gui_routing(self):
+        ''' The GUI is the queue's only consumer; if the flag outlives it,
+            get_ui_provider() routes prompts to a queue nobody drains and the
+            server loop freezes. destroy() must call set_gui_active(False)
+        '''
+
+        for node in ast.walk(self.tree):
+            if isinstance(node, ast.FunctionDef) and node.name == 'destroy':
+                calls = [
+                    n for n in ast.walk(node)
+                    if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                    and n.func.id == 'set_gui_active'
+                    and n.args and isinstance(n.args[0], ast.Constant)
+                    and n.args[0].value is False
+                ]
+                self.assertTrue(calls, 'destroy() no longer flips the GUI flag')
+                return
+        self.fail('DesktopDashboard.destroy() is gone - the dead-GUI deadlock is back')
+
+
+# Layer 2: composite widgets - display required, mainloop NOT required
+@_needs_display
+class TkTestCase(unittest.TestCase):
+    ''' One hidden root per test class; tests pump events manually '''
+
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Window(title='test', width=400, height=300)
+        cls.root.withdraw()  # never actually show a window
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.root.destroy()
+
+    def pump(self):
+        ''' Process all pending Tk events without entering mainloop '''
+
+        self.root.update_idletasks()
+        self.root.update()
+
+    def wait_for(self, cond, timeout_ms=1000):
+        ''' Pump until `cond()` holds or the timeout expires. Unlike a bare pump(),
+            the sleep lets after()-scheduled work mature - needed for the bounded
+            grab retry, which arrives on a 25ms timer under strict X11.
+        '''
+
+        deadline = time.monotonic() + timeout_ms / 1000
+        while time.monotonic() < deadline:
+            self.pump()
+            if cond():
+                return True
+            time.sleep(0.01)
+        return cond()
+
+
+class TestWidgets(TkTestCase):
+
+    def _button(self, *args, **kwargs):
+        ''' Build a Button and force its first paint '''
+
+        btn = Button(self.root, *args, **kwargs)
+        btn.pack()
+        self.pump()
+        btn._draw()
+        return btn
+
+    def test_button_renders_its_label(self):
+        btn = self._button('Go', lambda: None, width=100, height=30)
+        self.assertEqual(btn.itemcget(btn.text_id, 'text'), 'Go')
+
+    def test_button_release_inside_fires_command(self):
+        fired = []
+        btn = self._button('Go', lambda: fired.append(1), width=100, height=30)
+
+        class E: x, y = 10, 10          # release inside the button bounds
+        btn._on_release(E)
+        self.assertEqual(fired, [1])
+
+        class Outside: x, y = 500, 500  # drag-off-and-release must NOT fire
+        btn._on_release(Outside)
+        self.assertEqual(fired, [1])
+
+    def test_button_hover_changes_canvas_fill(self):
+        ''' Assert on canvas item state, not pixels '''
+
+        btn = self._button('Hover', lambda: None)
+        btn._on_enter(None)
+        self.assertEqual(btn.itemcget(btn.rect_id, 'fill'), Theme.HOVER)
+        btn._on_leave(None)
+        self.assertEqual(btn.itemcget(btn.rect_id, 'fill'), Theme.PRIMARY)
+
+    def test_toggle_flips_state_and_notifies(self):
+        seen = []
+        t = Toggle(self.root, text='opt', command=seen.append, is_on=False)
+        t.pack(); self.pump()
+        t.toggle()
+        self.assertTrue(t.get())
+        self.assertEqual(seen, [True])
+
+    def test_entry_masks_but_returns_plaintext(self):
+        e = Entry(self.root, show='*')
+        e.pack(); self.pump()
+        e.entry.insert(0, '1234')
+        self.assertEqual(e.get(), '1234')
+        self.assertEqual(e.entry.cget('show'), '*')   # still masked on screen
+
+    def test_entry_placeholder_is_not_masked_and_reads_empty(self):
+        # The PIN-field subtlety: the hint must not render as asterisks, 
+        # an untouched field must read as empty rather than as the hint text.
+        e = Entry(self.root, show='*', placeholder='Enter PIN')
+        e.pack(); self.pump()
+        self.assertEqual(e.entry.cget('show'), '')    # unmasked while hinting
+        self.assertEqual(e.get(), '')                 # hint is not user input
+        e._clear_placeholder()
+        e.entry.insert(0, '4321')
+        self.assertEqual(e.entry.cget('show'), '*')   # mask restored on input
+        self.assertEqual(e.get(), '4321')
+
+    def test_button_survives_bare_toplevel_host(self):
+        ''' Unscaled buttons beat invisible ones '''
+
+        host = tk.Toplevel(self.root)   # mapped briefly: withdrawn toplevels
+        host.geometry('120x50+0+0')     # never lay out children (width stays 1)
+        try:
+            btn = Button(host, 'Go', lambda: None, width=100, height=30)
+            btn.pack()
+            self.wait_for(lambda: btn.winfo_width() > 1)
+            btn._draw()                 # must not die on missing ui_scale
+            self.assertIsNotNone(btn.text_id, 'Button never drew on a bare host')
+            self.assertEqual(btn.itemcget(btn.text_id, 'text'), 'Go')
+        finally:
+            host.destroy()
+
+    def test_callback_exceptions_are_logged_not_swallowed(self):
+        ''' Window.report_callback_exception routes Tk-swallowed tracebacks
+            into logging 
+        '''
+
+        with self.assertLogs(level='ERROR') as captured:
+            try:
+                raise ValueError('boom in a callback')
+            except ValueError:
+                self.root.report_callback_exception(*sys.exc_info())
+        self.assertIn('boom in a callback', '\n'.join(captured.output))
+
+
+    def test_zoom_respects_bounds(self):
+        for _ in range(30):
+            self.root._zoom_in()
+        self.assertLessEqual(self.root.zoom_level, 24)
+        for _ in range(40):
+            self.root._zoom_out()
+        self.assertGreaterEqual(self.root.zoom_level, 8)
+
+
+class TestWidgetDelegation(TkTestCase):
+    ''' Textbox/Listbox wrap a native widget inside a rounded Frame '''
+
+    def test_textbox_configure_and_cget_round_trip(self):
+
+        tb = Textbox(self.root)
+        tb.configure(bg='#123456')
+        self.assertEqual(str(tb.cget('bg')), '#123456')
+        tb.insert('end', 'hello')
+        self.assertIn('hello', tb.text.get('1.0', 'end'))
+
+
+    def test_listbox_configure_and_cget_round_trip(self):
+        lb = Listbox(self.root)
+        lb.configure(selectforeground='#abcdef')
+        self.assertEqual(str(lb.cget('selectforeground')), '#abcdef')
+
+
+    def test_listbox_insert_and_delete(self):
+
+        lb = Listbox(self.root)
+        lb.insert('end', 'a')
+        lb.insert('end', 'b')
+        self.assertEqual(lb.listbox.size(), 2)
+        lb.delete(0, 'end')
+        self.assertEqual(lb.listbox.size(), 0)
+
+
+class TestToplevelGrabLifecycle(TkTestCase):
+    ''' Pins the lifecycle contract: no modal grab while withdrawn (X11 raises "grab failed: window not viewable"  
+    
+        NOTE: Xvfb's grab semantics are lenient - the crash these guard against only manifests 
+        under a real WM. A green run here is necessary but not sufficient - sanity-run
+        the widget gallery on an actual desktop too.
+    '''
+
+    def tearDown(self):
+        # A failed assertion must not leave a grab that poisons later tests
+        for w in list(self.root.winfo_children()):
+            if isinstance(w, tk.Toplevel) and w.winfo_exists():
+                w.grab_release()
+                w.destroy()
+        self.pump()
+
+    def test_construction_takes_no_grab_and_stays_hidden(self):
+        ''' THE regression: __init__ used to grab_set() while withdrawn, which
+            X11 rejects with TclError. Construction must neither raise nor
+            hold a grab. '''
+
+        try:
+            tl = Toplevel(self.root, title='probe', width=200, height=120)
+        except tk.TclError as e:
+            self.fail(f'grab regression: Toplevel unconstructable while '
+                      f'withdrawn ({e}) - grab_set belongs in show()')
+        self.pump()
+        self.assertEqual(tl.winfo_viewable(), 0, 'flashed before show()')
+        self.assertIsNone(self.root.grab_current(),
+                          'modal grab taken while withdrawn - X11 crashes here')
+
+    def test_show_takes_grab_and_reveals(self):
+        tl = Toplevel(self.root, title='pin', width=200, height=120)
+        tl.show()
+        # The master root is withdrawn here, so show() drops the transient
+        # hint (a transient of an unmapped master may never map at all) and
+        # the grab may arrive via the bounded 25ms retry - hence wait_for.
+        self.assertTrue(self.wait_for(lambda: tl.winfo_viewable() == 1),
+                        'dialog never mapped after show()')
+        # str() comparison sidesteps the dual-module class-identity trap
+        self.assertTrue(self.wait_for(
+            lambda: str(self.root.grab_current()) == str(tl)),
+            'show() must own the modal grab')
+
+    def test_destroy_releases_grab(self):
+        ''' A cancelled PIN dialog must not leave the whole app ungrabbable '''
+
+        tl = Toplevel(self.root, title='pin', width=200, height=120)
+        tl.show()
+        self.wait_for(lambda: self.root.grab_current() is not None)
+        tl.destroy()
+        self.pump()
+        self.assertIsNone(self.root.grab_current())
+
+    def test_show_survives_destroy_mid_reveal(self):
+        ''' A scripted user (or our modal test driver) can destroy the dialog
+            around the reveal; the pending grab retry then fires against a
+            dead window. Pinned: show() never raises and no grab is left. '''
+
+        tl = Toplevel(self.root, title='doomed', width=200, height=120)
+        self.root.after(1, tl.destroy)
+        tl.show()                       # must not raise
+        self.wait_for(lambda: not tl.winfo_exists())
+        self.assertIsNone(self.root.grab_current())
+
+    def test_two_dialogs_in_sequence(self):
+        ''' The retry-PIN flow: dialog one closes, dialog two must be able to
+            take the grab afresh (a leaked grab here blocks the second prompt). '''
+
+        first = Toplevel(self.root, title='attempt 1', width=200, height=120)
+        first.show()
+        self.wait_for(lambda: self.root.grab_current() is not None)
+        first.destroy(); self.pump()
+
+        second = Toplevel(self.root, title='attempt 2', width=200, height=120)
+        second.show()
+        self.assertTrue(self.wait_for(
+            lambda: str(self.root.grab_current()) == str(second)),
+            'second dialog never re-acquired the grab')
+
+
+class TestMessageBoxGrabLifecycle(TkTestCase):
+    ''' MessageBox builds a bare tk.Toplevel with no master, so it attaches to
+        the default root - which in this suite is TkTestCase's Window. The
+        driver below leans on that (and documents it). '''
+
+    def tearDown(self):
+        for w in list(self.root.winfo_children()):
+            if isinstance(w, tk.Toplevel) and w.winfo_exists():
+                w.grab_release()
+                w.destroy()
+        self.pump()
+
+    def _close_when_present(self, closed):
+        def run():
+            dlgs = [w for w in self.root.winfo_children()
+                    if isinstance(w, tk.Toplevel) and w.winfo_exists()]
+            if not dlgs:
+                self.root.after(50, run)
+                return
+            dlgs[-1].destroy()
+            closed.append(1)
+        self.root.after(150, run)
+
+    def test_askyesno_defaults_false_when_closed_and_releases_grab(self):
+        from src.tkinter_mods import MessageBox
+        closed = []
+        self._close_when_present(closed)
+        self.assertFalse(MessageBox.askyesno('Confirm', 'Proceed?'),
+                         'closing the dialog must mean No, not Yes')
+        self.assertTrue(closed, 'driver never found the MessageBox toplevel')
+        self.pump()
+        self.assertIsNone(self.root.grab_current(),
+                          'MessageBox leaked its modal grab')
+
+    def test_messagebox_inherits_root_ui_scale(self):
+        ''' Regression: raw tk.Toplevel had no ui_scale, so Button._draw died
+            with AttributeError (swallowed by Tk) and the OK/Yes/No buttons
+            never rendered; on HiDPI the box also stayed at 100%. '''
+
+        from src.tkinter_mods import MessageBox, Button as ModsButton
+
+        seen = {}
+        def probe(dlg):
+            seen['ui_scale'] = getattr(dlg, 'ui_scale', None)
+            buttons = find_by_attr(dlg, 'rect_id')
+            self.pump()
+            for b in buttons:
+                b._draw()               # withdrawn-root harness: force paint
+            seen['drawn'] = [b.text_id is not None for b in buttons]
+            dlg.destroy()
+
+        def run():
+            dlgs = [w for w in self.root.winfo_children()
+                    if isinstance(w, tk.Toplevel) and w.winfo_exists()]
+            if not dlgs:
+                self.root.after(50, run)
+                return
+            probe(dlgs[-1])
+        self.root.after(150, run)
+
+        MessageBox.showinfo('Info', 'scaled?')
+        self.assertEqual(seen.get('ui_scale'), self.root.ui_scale)
+        self.assertTrue(seen.get('drawn') and all(seen['drawn']),
+                        'MessageBox buttons failed to draw (ui_scale missing?)')
+
+
+# -- Layer 3: blocking modal dialogs, driven by scheduled interaction
+class TestModalRenderer(TkTestCase):
+
+    def setUp(self):
+        self._after_ids = []
+        self._drive_error = None
+
+    def tearDown(self):
+        ''' A dialog that raises leaves an open Toplevel (holding a grab) and a pending 
+            after() callback behind
+        '''
+
+        for aid in self._after_ids:
+            try:
+                self.root.after_cancel(aid)
+            except tk.TclError:
+                pass
+        for w in list(self.root.winfo_children()):
+            if isinstance(w, tk.Toplevel) and w.winfo_exists():
+                w.grab_release()
+                w.destroy()
+        self.pump()
+
+        if self._drive_error is not None:
+            raise self._drive_error
+
+    def _renderer(self):
+        from src.dashboard import ModalRenderer
+        return ModalRenderer(self.root)
+
+    def _drive(self, action, delay=150):
+        ''' Schedule `action(dialog)` against the modal once it exists '''
+
+        def run():
+            dialogs = [w for w in self.root.winfo_children()
+                       if isinstance(w, tk.Toplevel) and w.winfo_exists()]
+            if not dialogs:             # dialog not built yet - retry shortly
+                self._after_ids.append(self.root.after(50, run))
+                return
+            try:
+                action(dialogs[-1])
+            except Exception as exc:
+                # Tk swallows exceptions raised inside an after() callback: it
+                # prints them and carries on, so the dialog is never dismissed
+                # and wait_window() blocks the whole suite forever. Capture the
+                # error and close the dialog so the test *fails* instead.
+                self._drive_error = exc
+                dialogs[-1].destroy()
+
+        self._after_ids.append(self.root.after(delay, run))
+
+    def test_prompt_pin_returns_entered_pin(self):
+        def type_and_submit(dlg):
+            # Drive the composite Entry, not the raw tk.Entry: the PIN field
+            # carries a placeholder, and while it is active get() reports ''.
+            # Inserting into the inner widget alone would return '' and pass
+            # only by accident of focus timing.
+            field = find_by_attr(dlg, '_clear_placeholder')[0]
+            field._clear_placeholder()
+            field.entry.insert(0, '4321')
+            dlg.event_generate('<Return>')
+
+        self._drive(type_and_submit)
+        self.assertEqual(self._renderer().prompt_pin(), '4321')
+
+    def test_prompt_pin_escape_cancels(self):
+        self._drive(lambda dlg: dlg.event_generate('<Escape>'))
+        self.assertIsNone(self._renderer().prompt_pin())
+
+    def test_confirm_sign_reject(self):
+        self._drive(lambda dlg: dlg.event_generate('<Escape>'))
+        self.assertFalse(self._renderer().confirm_sign('sign this?'))
+
+    def test_choose_certificate_defaults_to_first(self):
+        self._drive(lambda dlg: dlg.event_generate('<Return>'))
+        certs = [{'subject': 'Alice', 'serial': '1'}, {'subject': 'Bob', 'serial': '2'}]
+        self.assertEqual(self._renderer().choose_certificate(certs), 0)
+
+    def test_choose_certificate_escape_returns_sentinel(self):
+        self._drive(lambda dlg: dlg.event_generate('<Escape>'))
+        certs = [{'subject': 'Alice', 'serial': '1'}]
+        self.assertEqual(self._renderer().choose_certificate(certs), -1)
+
+
+# ===========================================================================
+# Comma-decimal locale (bg_BG) canvas smoke. pybiss's audience runs bg_BG,
+# where LC_NUMERIC's decimal separator is ','. Historically Tk's float->Tcl
+# conversion followed the C locale and emitted "1,5", crashing canvas coord
+# parsing. Modern CPython converts dot-decimal regardless, so this passes today
+# -- it guards the older-Tk platforms in the CI matrix.
+# ===========================================================================
+@_needs_display
+class TestCommaLocaleCanvas(unittest.TestCase):
+
+    def _try_set_bg_locale(self):
+        for name in ('bg_BG.UTF-8', 'bg_BG.utf8', 'bg_BG'):
+            try:
+                locale.setlocale(locale.LC_NUMERIC, name)
+                return name
+            except locale.Error:
+                continue
+        return None
+
+    def test_float_coords_survive_comma_locale(self):
+        saved = locale.setlocale(locale.LC_NUMERIC)
+        root = None
+        try:
+            if not self._try_set_bg_locale():
+                self.skipTest('bg_BG locale not installed')
+            self.assertEqual(locale.str(1.5), '1,5')   # sanity: really comma-decimal
+            root = tk.Tk()
+            root.withdraw()
+            cv = tk.Canvas(root, width=100, height=100)
+            cv.create_line(1.5, 2.5, 10.25, 20.75)     # must not raise
+            cv.create_polygon(1.5, 1.5, 50.5, 10.0, 25.25, 40.5)
+            cv.update_idletasks()
+        finally:
+            if root is not None:
+                root.destroy()
+            locale.setlocale(locale.LC_NUMERIC, saved)
+
+
+if __name__ == '__main__':
+    unittest.main()

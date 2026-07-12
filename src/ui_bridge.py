@@ -1,5 +1,9 @@
 import sys, queue
 
+sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
+
+from config import config
+
 
 _GUI_IS_ACTIVE = False
 _UI_PROVIDER_OVERRIDE = None
@@ -12,36 +16,42 @@ def set_gui_active(state: bool=True):
 
 
 def set_ui_provider(provider=None):
-    '''
-    Installs an explicit UI provider (embedding, automation, tests),
-    taking precedence over the GUI/CLI routing. Pass None to reset.
-    '''
 
     global _UI_PROVIDER_OVERRIDE
     _UI_PROVIDER_OVERRIDE = provider
 
 
-# Thread-safe pipeline between the background server and the UI
 ui_task_queue = queue.Queue()
 
 
 class ThreadSafeUIProxy:
     ''' Used by the background server to ask for user input without crashing Tkinter '''
-    
-    def prompt_pin(self, attempt: int = 1, label: str = 'PIN') -> str:
+
+    def __init__(self, timeout: float = None):
+        self.timeout = timeout
+
+    def _ask(self, task_type: str, kwargs: dict, cancel_sentinel):
+
         res_q = queue.Queue()
-        ui_task_queue.put(('prompt_pin', {'attempt': attempt, 'label': label}, res_q))
-        return res_q.get()
+        ui_task_queue.put((task_type, kwargs, res_q))
+        timeout = self.timeout
+        if timeout is None:
+            timeout = float(config.get('promptTimeoutSeconds', 180))
+        try:
+            return res_q.get(timeout=timeout)
+        except queue.Empty:
+            return cancel_sentinel
+
+
+    def prompt_pin(self, attempt: int = 1, label: str = 'PIN') -> str:
+        return self._ask('prompt_pin', {'attempt': attempt, 'label': label}, None)
 
     def choose_certificate(self, certs: list[dict]) -> int:
-        res_q = queue.Queue()
-        ui_task_queue.put(('choose_certificate', {'certs': certs}, res_q))
-        return res_q.get()
+        return self._ask('choose_certificate', {'certs': certs}, -1)
 
     def confirm_sign(self, text: str, additional_text: str = None) -> bool:
-        res_q = queue.Queue()
-        ui_task_queue.put(('confirm_sign', {'text': text, 'additional_text': additional_text}, res_q))
-        return res_q.get()
+        return self._ask('confirm_sign',
+                         {'text': text, 'additional_text': additional_text}, False)
 
 
 class CLIUserInterface:
@@ -83,7 +93,6 @@ class CLIUserInterface:
 
 def get_ui_provider():
 
-    # An explicitly installed provider wins over any routing logic
     if _UI_PROVIDER_OVERRIDE is not None:
         return _UI_PROVIDER_OVERRIDE
 

@@ -8,7 +8,7 @@ from config import config
 # Centralized translation dictionaries
 _TRANSLATIONS = {
     'en': {
-        # --- UI Modals (server_ui.py) ---
+        # --- UI Modals (ui_bridge.py) ---
         'pin_title': 'Security Verification',
         'pin_prompt': 'Enter Smart Card PIN:',
         'pin_error': 'Incorrect PIN. Try again (Attempt {attempt}):',
@@ -48,7 +48,7 @@ _TRANSLATIONS = {
     },
     
     'bg': {
-        # --- UI Modals (server_ui.py) ---
+        # --- UI Modals (ui_bridge.py) ---
         'pin_title': 'Проверка на сигурността',
         'pin_prompt': 'Въведете ПИН код на смарт картата:',
         'pin_error': 'Грешен ПИН. Опитайте отново (Опит {attempt}):',
