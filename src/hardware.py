@@ -3,10 +3,9 @@ from ctypes import (
     pointer, byref, sizeof, cast, CDLL, POINTER, c_ubyte, c_ulong, c_void_p, c_char_p
 )
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from pkcs11_funcs import CK_FUNCTION_LIST
-from pkcs11_types import (
+from .pkcs11_funcs import CK_FUNCTION_LIST
+from .pkcs11_types import (
     CK_RV, CKR_OK, CK_SESSION_HANDLE, CKF_SERIAL_SESSION, CKF_RW_SESSION, CK_BYTE, CKU_USER,
     CK_ULONG, CKO_PRIVATE_KEY, CK_ATTRIBUTE, CKA_CLASS, CKA_ID, CK_OBJECT_HANDLE, CK_MECHANISM,
     CKM_SHA256_RSA_PKCS, CKO_CERTIFICATE, CKA_VALUE, CK_BBOOL, CK_SLOT_ID,
@@ -16,8 +15,8 @@ from pkcs11_types import (
     CKA_SIGN, CKA_DECRYPT, CKA_SENSITIVE, CKA_EXTRACTABLE, CKU_SO, CKC_X_509,
     CKA_CERTIFICATE_TYPE, CK_UTF8CHAR, CK_TOKEN_INFO
 )
-from cert_parser import get_rsa_public_key
-from spkac import build_spkac_payload, assemble_final_spkac
+from .cert_parser import get_rsa_public_key
+from .spkac import build_spkac_payload, assemble_final_spkac
 
 
 LIBCVP11_PATH = f'{__file__.rsplit('/', 2)[0]}/assets/libcvP11.so'

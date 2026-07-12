@@ -1,20 +1,18 @@
 import os, sys, logging, tkinter as tk, base64, threading, queue
 from tkinter import filedialog
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-import detector 
-import hardware
+from . import detector
+from . import hardware
+from .config import config
+from .i18n import _
+from .app import app as api_server
 
-from config import config
-from i18n import _
-from app import app as api_server
-
-from src.tkinter_mods import (
+from .tkinter_mods import (
     Theme, Window, Button, Frame, Scrollbar, MessageBox, Toggle, Label, 
     set_dark_titlebar, Toplevel, Textbox, Listbox, Entry
 )
-from src.ui_bridge import ui_task_queue, set_gui_active
+from .ui_bridge import ui_task_queue, set_gui_active
 
 
 class DesktopDashboard(Window):
@@ -277,7 +275,7 @@ class DesktopDashboard(Window):
 
             # Strip PEM headers if the user selected a PEM file
             if b'-----BEGIN' in cert_data:
-                from cert_parser import pem_to_der
+                from .cert_parser import pem_to_der
                 cert_data = pem_to_der(cert_data)[0]
 
             funcs, slot = self._load_card()
@@ -608,15 +606,19 @@ class ModalRenderer:
         return result['confirmed']
 
 
-if __name__ == '__main__':
+def main():
+    ''' Desktop dashboard + the REST API on a background daemon thread '''
 
-    # Start the REST API in a background daemon thread
     server_thread = threading.Thread(
-        target=lambda: api_server.run(host='127.0.0.1', port=4843), 
+        target=lambda: api_server.run(host='127.0.0.1', port=4843),
         daemon=True
     )
     server_thread.start()
 
-    # Start the native Desktop UI on the main thread (Blocks until closed)
+    # The native Desktop UI runs on the main thread (blocks until closed)
     app = DesktopDashboard()
     app.mainloop()
+
+
+if __name__ == '__main__':
+    main()

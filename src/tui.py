@@ -7,12 +7,10 @@ else:
     import tty
     import select
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from detector import auto_detect_library
-from hardware import load_pkcs11, get_slots, get_certificates, sign_payload
-from cert_parser import get_x509_subject
-
+from .detector import auto_detect_library
+from .hardware import load_pkcs11, get_slots, get_certificates, sign_payload
+from .cert_parser import get_x509_subject
 
 
 # --- ANSI Escape Sequences ---

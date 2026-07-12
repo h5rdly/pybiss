@@ -9,3 +9,10 @@
 
 settings.ini
 biss_portal_traffic.jsonl
+__pycache__/
+
+build/
+dist/
+*.egg-info/
+
+pybiss.log

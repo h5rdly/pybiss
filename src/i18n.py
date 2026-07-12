@@ -1,8 +1,7 @@
 import sys
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from config import config
+from .config import config
 
 
 # Centralized translation dictionaries

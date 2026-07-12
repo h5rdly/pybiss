@@ -1,11 +1,10 @@
 import sys
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from sc_types import SCARDHANDLE
-from sc_ffi import SmartCardConnection
-from sc_apdu import pad_pkcs1_v15_sha256, read_binary_file, build_apdu, decode_ecdsa_signature, ber_tlv
-from pkcs15 import parse_pkcs15_filesystem, encode_pkcs15_pin
+from .sc_types import SCARDHANDLE
+from .sc_ffi import SmartCardConnection
+from .sc_apdu import pad_pkcs1_v15_sha256, read_binary_file, build_apdu, decode_ecdsa_signature, ber_tlv
+from .pkcs15 import parse_pkcs15_filesystem, encode_pkcs15_pin
 
 
 # --- Known ATRs for the card families B-Trust issues ---
@@ -36,7 +35,6 @@ SCHSM_ATRS = [
     '3BFE1800008131FE458031815448534D31738021408107FA',
     '3BF81300008131FE454A434F5076323431B7', # Cryptovision
 ]
-
 
 
 class BaseCardDriver:
@@ -120,7 +118,6 @@ class BaseCardDriver:
 
     def compute_signature(self, raw_hash: bytes, is_ecdsa: bool = False, key_size_bits: int = 2048) -> bytes:
         raise NotImplementedError
-
 
 
 class BTrustDriver:

@@ -1,8 +1,7 @@
 import os, sys, socket, secrets, hashlib, shutil, subprocess, time
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from sc_apdu import pad_pkcs1_v15_sha256
+from .sc_apdu import pad_pkcs1_v15_sha256
 
 
 # The official BISS daemon listens HTTPS-only on the first free of these ports.

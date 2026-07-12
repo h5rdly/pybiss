@@ -12,4 +12,7 @@ Homepage = "https://github.com/h5rdly/pybiss"
 [project.scripts]
 # pybiss-server = "src.app:app.run"
 # pybiss-tui = "src.tui:run_tui"
-# pybiss-gui = "src.desktop_ui:main"
+# pybiss-gui = "src.dashboard:main"
+
+[tool.setuptools]
+# packages = ["src"]

@@ -167,26 +167,23 @@ class TestMonitorUiQueueLive(unittest.TestCase):
         def after(self, delay, cb): self.rescheduled = True
 
 
-    @staticmethod
-    def _dash_queue():
-        # The dual-module trap, queue edition: dashboard.py imports
-        # `ui_bridge` via its sys.path shim while this file imports
-        # `src.ui_bridge` - two module objects, two DIFFERENT queues. Tasks
-        # put on ours are invisible to _monitor_ui_queue, so drive the queue
-        # object in the dashboard's own namespace.
-        import src.dashboard
-        return src.dashboard.ui_task_queue
-
     def tearDown(self):
-        q = self._dash_queue()
-        while not q.empty():
-            q.get_nowait()
+        while not ui_task_queue.empty():
+            ui_task_queue.get_nowait()
 
+    def test_single_queue_identity(self):
+        ''' The packaging pass retired the dual-module trap: dashboard.py once
+            imported `ui_bridge` via a sys.path shim while tests imported
+            `src.ui_bridge` - two module objects, two DIFFERENT queues. Pin
+            that there is exactly one queue object ever again. '''
+
+        import src.dashboard
+        self.assertIs(src.dashboard.ui_task_queue, ui_task_queue)
 
     def test_routes_pin_task_and_answers(self):
 
         res_q = queue.Queue()
-        self._dash_queue().put(('prompt_pin', {'attempt': 1, 'label': 'PIN'}, res_q))
+        ui_task_queue.put(('prompt_pin', {'attempt': 1, 'label': 'PIN'}, res_q))
         dash = self._FakeDash()
         DesktopDashboard._monitor_ui_queue(dash)
         self.assertEqual(res_q.get_nowait(), '1234')

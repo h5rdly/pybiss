@@ -1,9 +1,8 @@
 import sys, logging
 
-sys.path.append(__file__.rsplit('/', 1)[0])
 
-from sc_apdu import read_binary_file
-from cert_parser import DerReader
+from .sc_apdu import read_binary_file
+from .cert_parser import DerReader
 
 
 logger = logging.getLogger(__name__)

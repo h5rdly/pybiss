@@ -11,8 +11,7 @@ sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
 from src.app import app
 from src.sc_apdu import pad_pkcs1_v15_sha256
-# app.py imports ui_bridge as a bare module; use the same instance it sees
-from ui_bridge import set_ui_provider
+from src.ui_bridge import set_ui_provider
 
 from x509_helpers import build_cert, TEST_N, TEST_D
 from test_server import MockReader, MockWriter

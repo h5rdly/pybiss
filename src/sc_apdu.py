@@ -1,8 +1,7 @@
 import sys
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from cert_parser import DerReader
+from .cert_parser import DerReader
 
 
 def pad_pkcs1_v15_sha256(hash_bytes: bytes, key_size_bits: int = 2048) -> bytes:

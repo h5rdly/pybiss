@@ -369,6 +369,7 @@ def wait_for_ssh(timeout=120):
 def cmd_provision(args):
     cmd_boot(args)
     if PROVISIONED.exists():
+        wait_for_ssh()               # a cold boot needs time to reach sshd
         log('already provisioned')
         return
     provision_serial()

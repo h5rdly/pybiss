@@ -1,16 +1,12 @@
 import base64, functools, os, sys
 
-sys.path.insert(0, __file__.replace('\\', '/').rsplit('/', 1)[0])
-
-import detector, hardware, service, jws, transport, backends
-
-from cert_parser import pem_to_der
-from config import config
-from i18n import reason
-from pkcs11_types import CKO_PRIVATE_KEY, CKO_PUBLIC_KEY, CKO_CERTIFICATE
-from server import MiniServer, CORS
-from ui_bridge import get_ui_provider
-
+from . import detector, hardware, service, jws, transport, backends
+from .cert_parser import pem_to_der
+from .config import config
+from .i18n import reason
+from .pkcs11_types import CKO_PRIVATE_KEY, CKO_PUBLIC_KEY, CKO_CERTIFICATE
+from .server import MiniServer, CORS
+from .ui_bridge import get_ui_provider
 
 
 # -- Endpoints 
@@ -435,7 +431,7 @@ def _select_and_build_chain(filtered_certs, all_ders, ui_provider):
 def _getsigner_cng(selector, show_valid_certs, ui_provider):
     if sys.platform != 'win32':
         raise backends.BackendUnavailable('CNG is Windows-only')
-    import mscapi as mscapi
+    from . import mscapi as mscapi
     raw_certs = mscapi.get_windows_certificates()
     try:
         filtered = service.filter_certificates(raw_certs, selector=selector, show_valid_certs=show_valid_certs)
@@ -476,8 +472,8 @@ def _getsigner_pkcs11(selector, show_valid_certs, ui_provider):
 def _getsigner_apdu(selector, show_valid_certs, ui_provider):
     ''' Read-only PKCS#15 certificate discovery over raw APDU (no PIN, safe) '''
     
-    from sc_ffi import SmartCardConnection
-    from btrust_cards import BTrustDriver
+    from .sc_ffi import SmartCardConnection
+    from .btrust_cards import BTrustDriver
 
     try:
         conn_cm = SmartCardConnection()
@@ -584,7 +580,7 @@ def sign(req):
 def _sign_cng(contents, hash_algorithm, signer_cert_der, ui_provider):
     if sys.platform != 'win32':
         raise backends.BackendUnavailable('CNG is Windows-only')
-    import mscapi as mscapi
+    from . import mscapi as mscapi
     raw_certs = mscapi.get_windows_certificates()
     try:
         target_ctx = next((c['windows_ctx'] for c in raw_certs if c['der'] == signer_cert_der), None)
@@ -678,5 +674,5 @@ def serve(https: bool = True):
 if __name__ == '__main__':
 
     # Runs the server headlessly via CLI (BISS-compatible HTTPS).
-    # For the full Desktop GUI, run src/dashboard.py instead.
+    # For the full Desktop GUI: python -m src.dashboard
     serve(https='--http' not in sys.argv)

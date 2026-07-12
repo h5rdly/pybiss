@@ -10,9 +10,8 @@ sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
 from src.app import app
 from src.server import Request
-# app.py imports ui_bridge/i18n as bare modules; use the same instances it sees
-from ui_bridge import set_ui_provider
-import i18n as biss_locale
+from src.ui_bridge import set_ui_provider
+from src import i18n as biss_locale
 from tests.x509_helpers import build_cert, build_test_chain, make_jws
 from tests.mocks import ForbiddenUI, FakeUI
 from src import jws
@@ -228,7 +227,7 @@ class TestLocaleCatalog(unittest.TestCase):
 
     def setUp(self):
         # Pin the language so assertions don't depend on the machine's settings.ini
-        from config import config
+        from src.config import config
         self.config = config
         self._original_lang = config.parser.get('Settings', 'language')
 

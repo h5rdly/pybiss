@@ -1,8 +1,7 @@
 import sys, queue
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from config import config
+from .config import config
 
 
 _GUI_IS_ACTIVE = False

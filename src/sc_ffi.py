@@ -2,9 +2,8 @@ import sys
 from ctypes import byref, c_ubyte, create_string_buffer
 from contextlib import contextmanager
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from sc_types import *
+from .sc_types import *
 
 
 # --- High-Level Pythonic Encapsulation ---

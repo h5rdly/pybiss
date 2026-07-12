@@ -193,7 +193,6 @@ def draw_rounded_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
     return canvas.create_polygon(points, **kwargs, smooth=True)
 
 
-
 class Label(tk.Label):
 
     def __init__(self, master, text='', **kwargs):

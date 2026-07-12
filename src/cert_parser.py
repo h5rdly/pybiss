@@ -87,7 +87,6 @@ def _parse_name(name_der: bytes) -> str:
     return ','.join(parts)
 
 
-
 def _decode_oid(oid_bytes: bytes) -> str:
     ''' Decodes DER OID content bytes to dotted notation (e.g. 2.5.29.14) '''
 

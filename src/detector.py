@@ -1,10 +1,7 @@
 import os, sys
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-import sc_ffi
-
-
+from . import sc_ffi
 #  BISS ATR Mappings 
 
 ATR_MAPPINGS = {

@@ -1,7 +1,5 @@
 import sys
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
-
 
 # --- Operations ---
 OP_READ = 'read'       # list / read certificates

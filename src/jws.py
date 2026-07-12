@@ -1,9 +1,8 @@
 import base64, json, sys, time
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from cert_parser import DerReader, parse_certificate
-from verifier import verify_rsa_pkcs1_v1_5
+from .cert_parser import DerReader, parse_certificate
+from .verifier import verify_rsa_pkcs1_v1_5
 
 
 # B-Trust operational CA (ACA) subject key identifiers. The certificate

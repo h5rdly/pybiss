@@ -1,9 +1,8 @@
 import sys
 from ctypes import CFUNCTYPE, POINTER, c_void_p, Structure
 
-sys.path.append(__file__.replace('\\', '/').rsplit('/', 1)[0])
 
-from pkcs11_types import (
+from .pkcs11_types import (
     CK_RV, CK_ULONG, CK_SESSION_HANDLE, CK_USER_TYPE, CK_BYTE, CK_ATTRIBUTE, CK_OBJECT_HANDLE,
     CK_MECHANISM, CK_VERSION, CK_SLOT_ID, CK_BBOOL, CK_TOKEN_INFO, CK_UTF8CHAR
 )
