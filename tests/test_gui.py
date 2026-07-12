@@ -6,44 +6,49 @@ Run on Linux CI with:  xvfb-run -a python -m unittest tests.test_gui
 Machines with no display skip the Tk-dependent classes automatically.
 '''
 
-import ast, locale, queue, sys, threading, time, unittest
+import ast, atexit, locale, os, queue, sys, threading, time, unittest
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
-from src.dashboard import DesktopDashboard
+from src import ui_bridge
 from src.ui_bridge import (
     ThreadSafeUIProxy, CLIUserInterface, ui_task_queue, set_gui_active,
-    get_ui_provider, _GUI_IS_ACTIVE,
+    get_ui_provider,
 )
 
 
 _SRC = __file__.replace('\\', '/').rsplit('/', 2)[0] + '/src'
 
-# Tk import can fail on minimal Pythons with no _tkinter
 try:
     import tkinter as tk
     from src.tkinter_mods import (
         Window, Toplevel, Button, Entry, Toggle, Textbox, Listbox, Theme,
     )
+    from src.dashboard import DesktopDashboard
     _TK_IMPORTABLE = True
-except Exception:
+except ImportError:
     _TK_IMPORTABLE = False
+    DesktopDashboard = None
 
-
-def _display_available() -> bool:
-    ''' True if a Tk root can actually be created (display server reachable) '''
-
-    if not _TK_IMPORTABLE:
-        return False
+# ONE shared hidden root for the entire module. Repeatedly creating and
+# destroying Tk() roots in a single process is a classic Aqua Tk segfault
+# on macOS runners
+_SHARED_ROOT = None
+if _TK_IMPORTABLE and not os.environ.get('PYBISS_SKIP_GUI_TESTS'):
     try:
-        probe = tk.Tk()
-        probe.destroy()
-        return True
+        _SHARED_ROOT = Window(title='pybiss-tests', width=400, height=300)
+        _SHARED_ROOT.withdraw()
+
+        def _destroy_shared_root():
+            try:
+                _SHARED_ROOT.destroy()
+            except tk.TclError:
+                pass
+        atexit.register(_destroy_shared_root)
     except tk.TclError:
-        return False
+        _SHARED_ROOT = None
 
-
-HAS_DISPLAY = _display_available()
+HAS_DISPLAY = _SHARED_ROOT is not None
 _needs_display = unittest.skipUnless(HAS_DISPLAY, 'no display server (run under xvfb-run on CI)')
 
 
@@ -133,7 +138,9 @@ class TestUiBridge(unittest.TestCase):
             not an undrained queue
         '''
 
-        saved = _GUI_IS_ACTIVE
+        # read the flag live off the module: a from-import binds the value at
+        # import time and would always "restore" the stale snapshot
+        saved = ui_bridge._GUI_IS_ACTIVE
         try:
             set_gui_active(True)
             self.assertIsInstance(get_ui_provider(), ThreadSafeUIProxy)
@@ -268,16 +275,20 @@ class TestDashboardWiring(unittest.TestCase):
 # Layer 2: composite widgets - display required, mainloop NOT required
 @_needs_display
 class TkTestCase(unittest.TestCase):
-    ''' One hidden root per test class; tests pump events manually '''
+    ''' All display tests share the ONE module root (macOS Aqua Tk segfaults
+        on repeated root create/destroy cycles); tests pump events manually '''
 
     @classmethod
     def setUpClass(cls):
-        cls.root = Window(title='test', width=400, height=300)
-        cls.root.withdraw()  # never actually show a window
+        cls.root = _SHARED_ROOT
 
     @classmethod
     def tearDownClass(cls):
-        cls.root.destroy()
+        # Scrub whatever this class packed into the shared root, but keep the
+        # root itself alive for the next class.
+        for w in list(cls.root.winfo_children()):
+            w.destroy()
+        cls.root.update_idletasks()
 
     def pump(self):
         ''' Process all pending Tk events without entering mainloop '''
@@ -392,12 +403,16 @@ class TestWidgets(TkTestCase):
 
 
     def test_zoom_respects_bounds(self):
-        for _ in range(30):
-            self.root._zoom_in()
-        self.assertLessEqual(self.root.zoom_level, 24)
-        for _ in range(40):
-            self.root._zoom_out()
-        self.assertGreaterEqual(self.root.zoom_level, 8)
+        saved = self.root.zoom_level    # shared root: leave it as found
+        try:
+            for _ in range(30):
+                self.root._zoom_in()
+            self.assertLessEqual(self.root.zoom_level, 24)
+            for _ in range(40):
+                self.root._zoom_out()
+            self.assertGreaterEqual(self.root.zoom_level, 8)
+        finally:
+            self.root.zoom_level = saved
 
 
 class TestWidgetDelegation(TkTestCase):
@@ -664,7 +679,7 @@ class TestModalRenderer(TkTestCase):
 # where LC_NUMERIC's decimal separator is ','. Historically Tk's float->Tcl
 # conversion followed the C locale and emitted "1,5", crashing canvas coord
 # parsing. Modern CPython converts dot-decimal regardless, so this passes today
-# -- it guards the older-Tk platforms in the CI matrix.
+# -- guards the older-Tk platforms in the CI matrix.
 # ===========================================================================
 @_needs_display
 class TestCommaLocaleCanvas(unittest.TestCase):
@@ -679,21 +694,23 @@ class TestCommaLocaleCanvas(unittest.TestCase):
         return None
 
     def test_float_coords_survive_comma_locale(self):
+        # Reuse the shared root (no second Tk() - see the macOS note up top);
+        # the float->Tcl conversion under test happens per-call, so setting
+        # LC_NUMERIC now affects the canvas calls below regardless of when the
+        # root was created.
         saved = locale.setlocale(locale.LC_NUMERIC)
-        root = None
+        cv = None
         try:
             if not self._try_set_bg_locale():
                 self.skipTest('bg_BG locale not installed')
             self.assertEqual(locale.str(1.5), '1,5')   # sanity: really comma-decimal
-            root = tk.Tk()
-            root.withdraw()
-            cv = tk.Canvas(root, width=100, height=100)
+            cv = tk.Canvas(_SHARED_ROOT, width=100, height=100)
             cv.create_line(1.5, 2.5, 10.25, 20.75)     # must not raise
             cv.create_polygon(1.5, 1.5, 50.5, 10.0, 25.25, 40.5)
-            cv.update_idletasks()
+            _SHARED_ROOT.update_idletasks()
         finally:
-            if root is not None:
-                root.destroy()
+            if cv is not None:
+                cv.destroy()
             locale.setlocale(locale.LC_NUMERIC, saved)
 
 

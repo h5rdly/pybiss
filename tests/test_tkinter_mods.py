@@ -2,10 +2,13 @@ import sys, unittest
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
-from src.tkinter_mods import (
-    detect_system_theme, _even, scrollbar_thumb_bounds, scrollbar_drag_start,
-    get_window_dpi_scale, DpiTracker, Window,
-)
+try:
+    from src.tkinter_mods import (
+        detect_system_theme, _even, scrollbar_thumb_bounds, scrollbar_drag_start,
+        get_window_dpi_scale, DpiTracker, Window,
+    )
+except ImportError as e:
+    raise unittest.SkipTest(f'tkinter not available on this platform: {e}')
 
 
 class FakeWindow:

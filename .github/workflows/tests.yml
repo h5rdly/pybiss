@@ -27,12 +27,18 @@ jobs:
           python-version: ${{ matrix.python-version }}
           allow-prereleases: ${{ endsWith(matrix.python-version, 't') }}
 
-      - name: Install PC/SC drivers on Linux
+      - name: Install PC/SC drivers, Tk and Xvfb on Linux
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libpcsclite1
-        
+        run: sudo apt-get update && sudo apt-get install -y libpcsclite1 tk xvfb
+
       - name: Run tests
+        if: runner.os != 'Linux'
         run: python -m unittest discover tests
+
+      # Xvfb gives the GUI tests a display; without it they skip silently
+      - name: Run tests (under Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python -m unittest discover tests
 
   # Alpine Linux (Musl) 
   test-alpine:
@@ -43,11 +49,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install Alpine PC/SC dependencies
-        run: apk add --no-cache pcsc-lite-libs
-        
+      # `tk` provides libtk8.6.so, xvfb-run a display, ttf-dejavu fonts 
+      - name: Install Alpine PC/SC, Tk and Xvfb dependencies
+        run: apk add --no-cache pcsc-lite-libs tk xvfb-run ttf-dejavu
+
       - name: Run tests
-        run: python -m unittest discover tests
+        run: xvfb-run -a python -m unittest discover tests
 
   # FreeBSD 
   test-freebsd:
@@ -60,6 +67,9 @@ jobs:
         with:
           release: "14.4"
           usesh: true
-          prepare: pkg install -y python314 pcsc-lite
+          # dejavu because Tk's Xft text rendering needs at least one real font.
+          prepare: pkg install -y python314 py314-tkinter pcsc-lite xorg-vfbserver dejavu
           run: |
-            python3.14 -m unittest discover tests
+            Xvfb :99 -screen 0 1280x800x24 &
+            sleep 2
+            DISPLAY=:99 python3.14 -m unittest discover tests
