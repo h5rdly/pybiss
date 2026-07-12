@@ -74,7 +74,6 @@ jobs:
       - name: Test in FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         with:
-          release: "14.4"
           usesh: true
           # dejavu because Tk's Xft text rendering needs at least one real font.
           prepare: pkg install -y python314 py314-tkinter pcsc-lite xorg-vfbserver dejavu
