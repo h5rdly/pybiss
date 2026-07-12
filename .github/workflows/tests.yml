@@ -62,6 +62,11 @@ jobs:
       - name: Install Alpine PC/SC, Tk and Xvfb dependencies
         run: apk add --no-cache pcsc-lite-libs tk xvfb-run ttf-dejavu
 
+      # When Alpine's `tk` package jumps to Tcl/Tk 9.x and drops libtk8.6.so, this
+      # line fails with the exact version story 
+      - name: Verify Tk runtime matches _tkinter
+        run: python -c "import _tkinter; print('Tk', _tkinter.TK_VERSION, 'Tcl', _tkinter.TCL_VERSION)"
+
       - name: Run tests
         run: xvfb-run -a python -m unittest discover tests
 
@@ -74,7 +79,6 @@ jobs:
       - name: Test in FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         with:
-          release: "14.4"
           usesh: true
           # dejavu because Tk's Xft text rendering needs at least one real font.
           prepare: pkg install -y python314 py314-tkinter pcsc-lite xorg-vfbserver dejavu
