@@ -29,7 +29,11 @@ jobs:
 
       - name: Install PC/SC drivers, Tk and Xvfb on Linux
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libpcsclite1 tk xvfb
+        # bg_BG locale: lets the comma-decimal canvas test actually run here
+        # (glibc); musl/mac legs skip it.
+        run: |
+          sudo apt-get update && sudo apt-get install -y libpcsclite1 tk xvfb
+          sudo locale-gen bg_BG.UTF-8
 
       - name: Run tests
         if: runner.os != 'Linux'

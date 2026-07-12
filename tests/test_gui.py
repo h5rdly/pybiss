@@ -703,7 +703,11 @@ class TestCommaLocaleCanvas(unittest.TestCase):
         try:
             if not self._try_set_bg_locale():
                 self.skipTest('bg_BG locale not installed')
-            self.assertEqual(locale.str(1.5), '1,5')   # sanity: really comma-decimal
+            if locale.str(1.5) != '1,5':
+                # musl (Alpine) accepts any locale name in setlocale() but
+                # keeps C-locale numeric formatting - there is no comma-decimal
+                # behaviour to exercise, so it can't run the test.
+                self.skipTest('libc has no real bg_BG numeric locale (musl?)')
             cv = tk.Canvas(_SHARED_ROOT, width=100, height=100)
             cv.create_line(1.5, 2.5, 10.25, 20.75)     # must not raise
             cv.create_polygon(1.5, 1.5, 50.5, 10.0, 25.25, 40.5)
