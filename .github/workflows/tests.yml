@@ -35,6 +35,16 @@ jobs:
           sudo apt-get update && sudo apt-get install -y libpcsclite1 tk xvfb
           sudo locale-gen bg_BG.UTF-8
 
+      # Loads this platform's PC/SC library through src/sc_types and binds every
+      # SCard* symbol: libpcsclite.so.1 (Linux), PCSC.framework (macOS), or
+      # winscard.dll with the ...A entry points and SCARDCONTEXT=c_void_p (Windows).
+      # Those three branches are real, separate ctypes code, and only the Linux one
+      # is otherwise exercised against a live library - a wrong soname, a missing
+      # symbol or a bad restype shows up here and nowhere else. Needs no daemon,
+      # no reader, no card.
+      - name: Verify PC/SC library binds
+        run: python -c "from src.sc_types import pcsc; p = pcsc(); print('PC/SC bound:', p.SCardListReaders_fn, '| T0 PCI:', p.g_rgSCardT0Pci.dwProtocol)"
+
       - name: Run tests
         if: runner.os != 'Linux'
         timeout-minutes: 10
@@ -67,6 +77,10 @@ jobs:
       - name: Verify Tk runtime matches _tkinter
         run: python -c "import _tkinter; print('Tk', _tkinter.TK_VERSION, 'Tcl', _tkinter.TCL_VERSION)"
 
+      # Same PC/SC binding check as the other legs, but against musl's pcsc-lite.
+      - name: Verify PC/SC library binds
+        run: python -c "from src.sc_types import pcsc; p = pcsc(); print('PC/SC bound:', p.SCardListReaders_fn, '| T0 PCI:', p.g_rgSCardT0Pci.dwProtocol)"
+
       - name: Run tests
         run: xvfb-run -a python -m unittest discover tests
 
@@ -91,6 +105,7 @@ jobs:
           run: |
             pcscd >/dev/null 2>&1
             sleep 1
+            python3.14 -c "from src.sc_types import pcsc; p = pcsc(); print('PC/SC bound:', p.SCardListReaders_fn, '| T0 PCI:', p.g_rgSCardT0Pci.dwProtocol)" || exit 1
             Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
             XVFB_PID=$!
             sleep 2
