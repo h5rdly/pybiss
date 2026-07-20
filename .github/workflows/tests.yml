@@ -30,9 +30,10 @@ jobs:
       - name: Install PC/SC drivers, Tk and Xvfb on Linux
         if: runner.os == 'Linux'
         # bg_BG locale: lets the comma-decimal canvas test actually run here
-        # (glibc); musl/mac legs skip it.
+        # (glibc); musl/mac legs skip it. pcscd (the daemon, not just the client
+        # lib) so the live-handshake test can talk to a real daemon below.
         run: |
-          sudo apt-get update && sudo apt-get install -y libpcsclite1 tk xvfb
+          sudo apt-get update && sudo apt-get install -y pcscd libpcsclite1 tk xvfb
           sudo locale-gen bg_BG.UTF-8
 
       # Loads this platform's PC/SC library through src/sc_types and binds every
@@ -57,7 +58,9 @@ jobs:
       - name: Run tests (under Xvfb)
         if: runner.os == 'Linux'
         timeout-minutes: 10
-        run: timeout -s ABRT 480 xvfb-run -a python -X faulthandler -m unittest discover tests
+        run: |
+          sudo pcscd || true
+          PYBISS_REQUIRE_PCSCD=1 timeout -s ABRT 480 xvfb-run -a python -X faulthandler -m unittest discover tests
 
   # Alpine Linux (Musl) 
   test-alpine:
@@ -100,17 +103,15 @@ jobs:
           # killed afterwards, or the backgrounded child keeps the session
           # open and the step hangs forever AFTER the tests pass.
           #
-          # pcscd runs here so tests/test_pcsc_daemon.py can assert that sc_ffi's
-          # ctypes really handshake with a LIVE daemon on FreeBSD
+          # No pcscd here: this VM has no USB subsystem, so pcscd starts but its
+          # hotplug thread aborts and it never serves (SCardEstablishContext ->
+          # COMM_ERROR). The live-daemon handshake is enforced on the Ubuntu leg
           run: |
-            pcscd >/dev/null 2>&1
-            sleep 1
             python3.14 -c "from src.sc_types import pcsc; p = pcsc(); print('PC/SC bound:', p.SCardListReaders_fn, '| T0 PCI:', p.g_rgSCardT0Pci.dwProtocol)" || exit 1
             Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
             XVFB_PID=$!
             sleep 2
-            PYBISS_REQUIRE_PCSCD=1 DISPLAY=:99 python3.14 -m unittest discover tests
+            DISPLAY=:99 python3.14 -m unittest discover tests
             rc=$?
             kill $XVFB_PID 2>/dev/null
-            pkill pcscd 2>/dev/null
             exit $rc
