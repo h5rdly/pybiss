@@ -6,12 +6,15 @@ sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 from src import sc_ffi, sc_types
 
 
-# Return codes that mean "a daemon is present but not actually serving" - no
-# reader plugged in, or a VM/CI host with no USB at all
+# Return codes that mean "a daemon is present but not actually serving us" - no
+# reader plugged in, a VM/CI host with no USB, or polkit refusing a session-less
+# caller. None of these is a ctypes marshalling bug (that surfaces as
+# SCARD_E_INVALID_* or a crash), so we skip on them rather than fail.
 _NO_LIVE_DAEMON = {
-    sc_types.SCARD_E_NO_SERVICE,       # socket absent - pcscd never came up
-    sc_types.SCARD_E_SERVICE_STOPPED,  # pcscd went away
-    sc_types.SCARD_F_COMM_ERROR,       # socket there, daemon not answering (FreeBSD CI, no USB)
+    sc_types.SCARD_E_NO_SERVICE,         # socket absent - pcscd never came up
+    sc_types.SCARD_E_SERVICE_STOPPED,    # pcscd went away
+    sc_types.SCARD_F_COMM_ERROR,         # socket there, daemon not answering (FreeBSD CI, no USB)
+    sc_types.SCARD_W_SECURITY_VIOLATION, # serving but polkit denied us (headless CI, no login session)
 }
 
 

@@ -59,6 +59,12 @@ jobs:
         if: runner.os == 'Linux'
         timeout-minutes: 10
         run: |
+          # pcsc-lite on Ubuntu gates SCardEstablishContext behind polkit; a
+          # headless runner has no active session, so allow the pcsc actions
+          # outright and reload polkit before starting the daemon.
+          sudo mkdir -p /etc/polkit-1/rules.d
+          printf 'polkit.addRule(function(action, subject) {\n  if (action.id.indexOf("org.debian.pcsc-lite.") === 0) { return polkit.Result.YES; }\n});\n' | sudo tee /etc/polkit-1/rules.d/49-pcscd.rules >/dev/null
+          sudo systemctl restart polkit || true
           sudo pcscd || true
           PYBISS_REQUIRE_PCSCD=1 timeout -s ABRT 480 xvfb-run -a python -X faulthandler -m unittest discover tests
 
