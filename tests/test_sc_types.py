@@ -18,13 +18,17 @@ class TestSCTypes(unittest.TestCase):
     def test_platform_handle_types(self):
         '''
         Verify that handles are mapped to the correct ctypes based on the OS.
-        Windows uses pointers (c_void_p), Linux/macOS uses integers (c_long).
-        Failure here causes immediate segfaults on 64-bit systems.
+        Windows uses pointer-sized handles (c_void_p); pcsc-lite on Linux/FreeBSD
+        uses c_long; Apple's PCSC.framework uses 32-bit int32 handles even on
+        64-bit macOS. A wrong width here causes immediate segfaults.
         '''
 
         if sys.platform == 'win32':
             assert SCARDCONTEXT == ctypes.c_void_p
             assert SCARDHANDLE == ctypes.c_void_p
+        elif sys.platform == 'darwin':
+            assert SCARDCONTEXT == ctypes.c_int32
+            assert SCARDHANDLE == ctypes.c_int32
         else:
             assert SCARDCONTEXT == ctypes.c_long
             assert SCARDHANDLE == ctypes.c_long
