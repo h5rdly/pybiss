@@ -70,6 +70,16 @@ class ReplayConnection:
         with open(path, 'r', encoding='utf-8') as f:
             return cls.from_dict(json.load(f), sequential=sequential)
 
+    # --- SmartCardConnection drop-in surface (context manager + card lock) ---
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def transaction(self):
+        return _NullTransaction()
+
     def get_atr(self) -> bytes:
         return self.atr
 
@@ -91,3 +101,10 @@ class ReplayConnection:
             raise Exception(f'No recorded response for APDU {apdu_bytes.hex().upper()}')
         # Repeat the last response once a single-shot APDU's queue is drained
         return queue.pop(0) if len(queue) > 1 else queue[0]
+
+
+class _NullTransaction:
+    ''' No-op card lock for replay (there is no hardware to lock) '''
+
+    def __enter__(self): return self
+    def __exit__(self, *exc): return False

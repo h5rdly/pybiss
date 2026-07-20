@@ -150,5 +150,39 @@ class TestDetector(unittest.TestCase):
              sc_ffi.get_atr, sc_ffi.disconnect_card, sc_ffi.release_context) = saved
 
 
+    def test_ccid_fallback_is_off_by_default(self):
+        ''' Path B only: the default never powers on the card over direct CCID '''
+
+        saved = (detector._pcsc_atrs, detector._ccid_atrs)
+        detector._pcsc_atrs = lambda: []
+        detector._ccid_atrs = lambda: self.fail('CCID must not be probed by default')
+        try:
+            self.assertEqual(detector.get_connected_atrs(), [])
+        finally:
+            (detector._pcsc_atrs, detector._ccid_atrs) = saved
+
+    def test_ccid_fallback_used_when_pcsc_empty(self):
+        ''' Path A: with ccid_fallback and no PC/SC, the ATR comes from CCID '''
+
+        saved = (detector._pcsc_atrs, detector._ccid_atrs)
+        detector._pcsc_atrs = lambda: []
+        detector._ccid_atrs = lambda: ['3B7FCCID']
+        try:
+            self.assertEqual(detector.get_connected_atrs(ccid_fallback=True), ['3B7FCCID'])
+        finally:
+            (detector._pcsc_atrs, detector._ccid_atrs) = saved
+
+    def test_pcsc_wins_and_ccid_is_not_consulted(self):
+        ''' B beats A: when PC/SC answers, the CCID fallback never runs '''
+
+        saved = (detector._pcsc_atrs, detector._ccid_atrs)
+        detector._pcsc_atrs = lambda: ['3B7FPCSC']
+        detector._ccid_atrs = lambda: self.fail('CCID must not run when PC/SC answered')
+        try:
+            self.assertEqual(detector.get_connected_atrs(ccid_fallback=True), ['3B7FPCSC'])
+        finally:
+            (detector._pcsc_atrs, detector._ccid_atrs) = saved
+
+
 if __name__ == '__main__':
     unittest.main()

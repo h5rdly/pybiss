@@ -185,6 +185,28 @@ def vm_pid():
         return None
 
 
+def usb_passthrough_args(spec):
+    '''
+    Hand a host USB device to the guest: --usb VID:PID (hex, e.g. 31aa:7001).
+
+    This is how the FreeBSD ugen(4) backend in src/ccid.py gets exercised for
+    real: run tests/test_utils/f_ccid.py on the host to conjure a virtual CCID reader on
+    dummy_hcd, pass it through here, and FreeBSD attaches it to ugen - no
+    physical hardware anywhere in the loop. QEMU must be able to open the node
+    (/dev/bus/usb/BBB/DDD) and no host driver may hold it (stop pcscd first).
+    '''
+
+    if not spec:
+        return []
+    try:
+        vid, pid = spec.split(':')
+        int(vid, 16), int(pid, 16)
+    except ValueError:
+        sys.exit(f'--usb wants VID:PID in hex, e.g. 31aa:7001 (got {spec!r})')
+    return ['-device', 'qemu-xhci,id=xhci',
+            '-device', f'usb-host,bus=xhci.0,vendorid=0x{vid},productid=0x{pid}']
+
+
 def cmd_boot(args):
     if vm_pid():
         log(f'already running (pid {vm_pid()})')
@@ -195,12 +217,17 @@ def cmd_boot(args):
     if accel[1] == 'tcg':
         log('WARNING: /dev/kvm not accessible - falling back to TCG (slow)')
 
+    usb = usb_passthrough_args(getattr(args, 'usb', None))
+    if usb:
+        log(f'passing host USB device {args.usb} through to the guest')
+
     qemu = [
         'qemu-system-x86_64', *accel, '-m', '2048', '-smp', '2',
         '-drive', f'file={WORK_IMG},if=virtio,format=qcow2',
         '-drive', f'file={DATA_IMG},if=virtio,format=raw',
         '-netdev', f'user,id=n0,hostfwd=tcp:127.0.0.1:{SSH_PORT}-:22',
         '-device', 'virtio-net-pci,netdev=n0',
+        *usb,
         '-display', 'none',
         # Unprovisioned: expose the serial console on TCP so provision can
         # script the ttyu0 login. Afterwards just log it to a file.
@@ -425,6 +452,10 @@ def cmd_ssh(args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument('--usb', metavar='VID:PID',
+                    help='pass a host USB device through to the guest (hex), e.g. '
+                         '31aa:7001 - the f_ccid virtual reader, so the FreeBSD '
+                         'ugen backend can be tested with no physical hardware')
     sub = ap.add_subparsers(dest='cmd', required=True)
     for name, fn in [('setup', cmd_setup), ('boot', cmd_boot),
                      ('provision', cmd_provision), ('sync', cmd_sync),

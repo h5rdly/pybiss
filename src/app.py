@@ -1,6 +1,7 @@
-import base64, functools, os, sys
+import base64, functools, hashlib, os, sys
 
 from . import detector, hardware, service, jws, transport, backends
+from .cards import BTrustDriver
 from .cert_parser import pem_to_der
 from .config import config
 from .i18n import reason
@@ -42,14 +43,13 @@ def get_version(req):
         'contentTypes': 'data, digest',
         'signatureTypes': 'signature',
         'selectorAvailable': True,
-        'hashAlgorithms': 'SHA1, SHA256, SHA384, SHA512'
+        'hashAlgorithms': 'SHA256, SHA384, SHA512'
     }
 
 
 @app.get('/status')
 def get_status(req):
-    # The official daemon answers with the literal JSON string "".
-    # Diagnostics live in /getInfo instead.
+    ''' The official daemon answers with the literal JSON string "". Diagnostics live in /getInfo instead '''
     return ''
 
 
@@ -187,12 +187,12 @@ def gen_spkac(req, payload):
     if not pin:
         return {'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
 
-    lib_path = detector.auto_detect_library()
-    if not lib_path:
+    try:
+        funcs = _load_pkcs11()
+    except backends.BackendUnavailable:
         return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.no-card-found')}
 
     try:
-        funcs = hardware.load_pkcs11(lib_path)
         slots = hardware.get_slots(funcs, token_present=True)
         if not slots:
             return {'status': 'error', 'reasonCode': 404, 'reasonText': reason('error.token-not-found')}
@@ -407,11 +407,19 @@ def del_cert(req, payload):
 
 def _detected_atr() -> str:
     ''' First connected card ATR (upper hex), or '' - used to pick a backend '''
+
     try:
-        atrs = detector.get_connected_atrs()
+        atrs = detector.get_connected_atrs(ccid_fallback=True)
         return atrs[0].upper() if atrs else ''
     except Exception:
         return ''
+
+
+def _aia_resolver():
+    ''' Fetches missing issuer certs over AIA, caching into the user config dir. '''
+
+    from . import chain_fetch
+    return chain_fetch.make_aia_resolver(config.config_dir / 'ca_cache')
 
 
 def _select_and_build_chain(filtered_certs, all_ders, ui_provider):
@@ -423,7 +431,7 @@ def _select_and_build_chain(filtered_certs, all_ders, ui_provider):
     if choice_idx == -1:
         return {'chain': [], 'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.user-canceled')}
     selected = filtered_certs[choice_idx]
-    chain_ders = service.build_certificate_chain(selected['der'], all_ders)
+    chain_ders = service.build_certificate_chain(selected['der'], all_ders, resolver=_aia_resolver())
     chain = [base64.b64encode(der).decode('utf-8') for der in chain_ders]
     return {'chain': chain, 'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success')}
 
@@ -441,12 +449,17 @@ def _getsigner_cng(selector, show_valid_certs, ui_provider):
             mscapi.free_windows_certificate(c['windows_ctx'])
 
 
-def _getsigner_pkcs11(selector, show_valid_certs, ui_provider):
+def _load_pkcs11():
+    ''' Test seam: resolve the vendor library and return its PKCS#11 function table '''
+
     lib_path = detector.auto_detect_library()
     if not lib_path:
         raise backends.BackendUnavailable('No PKCS#11 library for the detected card')
+    return hardware.load_pkcs11(lib_path)
 
-    funcs = hardware.load_pkcs11(lib_path)
+
+def _getsigner_pkcs11(selector, show_valid_certs, ui_provider):
+    funcs = _load_pkcs11()
     slots = hardware.get_slots(funcs, token_present=True)
     if not slots:
         raise backends.BackendUnavailable('No token present')
@@ -469,17 +482,62 @@ def _getsigner_pkcs11(selector, show_valid_certs, ui_provider):
     return _select_and_build_chain(filtered, [c['der'] for c in all_certs], ui_provider)
 
 
-def _getsigner_apdu(selector, show_valid_certs, ui_provider):
-    ''' Read-only PKCS#15 certificate discovery over raw APDU (no PIN, safe) '''
-    
+def _pcsc_factory():
     from .sc_ffi import SmartCardConnection
-    from .btrust_cards import BTrustDriver
+    return SmartCardConnection()
+
+
+def _ccid_factory():
+    from .ccid import CcidConnection
+    return CcidConnection()
+
+
+class CardUnreachable(Exception):
+    ''' Neither PC/SC nor direct CCID could reach a card; carries both reasons '''
+
+    def __init__(self, pcsc_error, ccid_error):
+        self.pcsc_error, self.ccid_error = pcsc_error, ccid_error
+        super().__init__(f'PC/SC: {pcsc_error} | direct CCID: {ccid_error}')
+
+
+class _CardConnection:
+    ''' Open the card over PC/SC, falling back to direct USB CCID '''
+
+    def __init__(self, pcsc_factory=_pcsc_factory, ccid_factory=_ccid_factory):
+        self._pcsc_factory, self._ccid_factory = pcsc_factory, ccid_factory
+        self._inner = None
+
+    def __enter__(self):
+        try:
+            inner = self._pcsc_factory()
+            conn = inner.__enter__()
+        except Exception as pcsc_error:
+            try:
+                inner = self._ccid_factory()
+                conn = inner.__enter__()
+            except Exception as ccid_error:
+                raise CardUnreachable(pcsc_error, ccid_error) from ccid_error
+        self._inner = inner
+        return conn
+
+    def __exit__(self, *exc):
+        return self._inner.__exit__(*exc) if self._inner is not None else False
+
+
+def _open_card():
+    return _CardConnection()
+
+
+def _getsigner_apdu(selector, show_valid_certs, ui_provider):
+    ''' Read-only certificate discovery over raw APDU (no PIN, safe) '''
+
+    from .cards import BTrustDriver
 
     try:
-        conn_cm = SmartCardConnection()
+        conn_cm = _open_card()
         conn = conn_cm.__enter__()
-    except Exception:
-        raise backends.BackendUnavailable('No card reachable over PC/SC')
+    except Exception as e:
+        raise backends.BackendUnavailable(f'No card reachable over PC/SC or direct CCID: {e}')
     try:
         with conn.transaction():
             driver = BTrustDriver.create(conn)
@@ -551,11 +609,25 @@ def sign(req):
         if not verified:
             return {'signatures': [], 'status': 'error', 'reasonCode': 403, 'reasonText': 'Server signature verification failed'}
 
-    # Confirm signature request with the user via UI
+    # Confirm signature request with the user via UI. The portal may set
+    # confirmText to the literal "hash" to signal that the content itself IS a
+    # hash. Otherwise confirmText is a human-readable message shown verbatim. 
+    # additionalConfirmText, when present, is shown alongside it. (Unlike the daemon,
+    # which skips the dialog when confirmText is absent, we always confirm - safer for
+    # a QES token.)
     ui_provider = get_ui_provider()
-    confirm_msg = confirm_text[0] if confirm_text else 'Authorize signature request from banking portal?'
-    
-    confirmed = ui_provider.confirm_sign(confirm_msg)
+    additional_confirm = data.get('additionalConfirmText')
+    raw_confirm = confirm_text[0] if confirm_text else None
+
+    if raw_confirm and raw_confirm.lower() == 'hash':
+        tail = contents[0]
+        confirm_msg = ('...' + tail[-20:]) if len(tail) > 20 else tail
+    elif raw_confirm:
+        confirm_msg = raw_confirm
+    else:
+        confirm_msg = 'Authorize signature request from banking portal?'
+
+    confirmed = ui_provider.confirm_sign(confirm_msg, additional_confirm)
     if not confirmed:
         return {'signatures': [], 'status': 'error', 'reasonCode': 400, 'reasonText': 'User rejected signature request'}
 
@@ -605,11 +677,10 @@ def _sign_cng(contents, hash_algorithm, signer_cert_der, ui_provider):
 
 
 def _sign_pkcs11(contents, hash_algorithm, signer_cert_der, ui_provider):
-    lib_path = detector.auto_detect_library()
-    if not lib_path:
-        raise backends.BackendUnavailable('No PKCS#11 library for the detected card')
     try:
-        funcs = hardware.load_pkcs11(lib_path)
+        funcs = _load_pkcs11()
+    except backends.BackendUnavailable:
+        raise
     except Exception as e:
         return {'signatures': [], 'status': 'error', 'reasonCode': 500, 'reasonText': f'Failed to load PKCS11 driver: {e}'}
 
@@ -644,10 +715,63 @@ def _sign_pkcs11(contents, hash_algorithm, signer_cert_der, ui_provider):
     return {'signatures': sigs, 'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success')}
 
 
+_APDU_HASH = {
+    'SHA256': ('sha256', 0x42),   # (hashlib name, IDPrime algorithm reference)
+    'SHA384': ('sha384', 0x52),
+    'SHA512': ('sha512', 0x62),
+}
+
+
 def _sign_apdu(contents, hash_algorithm, signer_cert_der, ui_provider):
-    ''' Raw-APDU signing, not yet enabled '''
-    
-    raise backends.BackendUnavailable('APDU signing pending real-card validation')
+    ''' Raw-APDU signing for MiniDriver IDPrime cards '''
+
+    algo = (hash_algorithm or 'SHA256').upper().replace('-', '')
+    if algo not in _APDU_HASH:
+        return {'signatures': [], 'status': 'error', 'reasonCode': 400,
+                'reasonText': reason('error.signature-type-not-supported')}
+    hash_name, algo_ref = _APDU_HASH[algo]
+
+    try:
+        conn_cm = _open_card()
+        conn = conn_cm.__enter__()
+    except Exception as e:
+        raise backends.BackendUnavailable(f'No card reachable over PC/SC or direct CCID: {e}')
+    try:
+        with conn.transaction():
+            driver = BTrustDriver.create(conn)
+            certs = driver.discover_certificates()
+            target = next((c for c in certs
+                           if c.get('der') == signer_cert_der and c.get('key_ref') is not None), None)
+            if target is None:
+                return {'signatures': [], 'status': 'error', 'reasonCode': 404,
+                        'reasonText': reason('error.token-not-found')}
+
+            pin = ui_provider.prompt_pin()
+            if not pin:
+                return {'signatures': [], 'status': 'error', 'reasonCode': 401,
+                        'reasonText': reason('error.user-canceled')}
+
+            # pin_index 1 = user PIN (0x11); otherwise the signature PIN (0x83)
+            pin_ref = driver.PIN_REF_USER if target.get('pin_index') in (None, 1) else driver.PIN_REF_SIGNATURE
+            try:
+                driver.verify_pin(pin, pin_ref=pin_ref)
+            except Exception as e:
+                return {'signatures': [], 'status': 'error', 'reasonCode': 401, 'reasonText': str(e)}
+
+            sigs = []
+            for payload_b64 in contents:
+                try:
+                    digest = hashlib.new(hash_name, base64.b64decode(payload_b64)).digest()
+                    driver.set_security_environment(target['key_ref'], algo_ref=algo_ref)
+                    sig = driver.compute_signature(digest)
+                    sigs.append(base64.b64encode(sig).decode('utf-8'))
+                except Exception as e:
+                    return {'signatures': [], 'status': 'error', 'reasonCode': 500,
+                            'reasonText': f'Signing failed: {e}'}
+            return {'signatures': sigs, 'status': 'ok', 'reasonCode': 200,
+                    'reasonText': reason('response.success')}
+    finally:
+        conn_cm.__exit__(None, None, None)
 
 
 _SIGN = {'cng': _sign_cng, 'pkcs11': _sign_pkcs11, 'apdu': _sign_apdu}
@@ -656,7 +780,7 @@ _SIGN = {'cng': _sign_cng, 'pkcs11': _sign_pkcs11, 'apdu': _sign_apdu}
 def serve(https: bool = True):
     '''
     HTTPS on the first free BISS port (53952-55), using a self-signed localhost cert that
-    is minted on first run.
+    is minted on first run
     '''
 
     if not https:

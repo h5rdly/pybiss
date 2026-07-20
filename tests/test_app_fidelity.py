@@ -65,6 +65,14 @@ class TestEnvelopes(unittest.TestCase):
         # Portals may version-gate; the value must mimic the Java "3.46" format
         self.assertRegex(res['version'], r'^\d+\.\d+$')
 
+    def test_advertised_hash_algorithms_are_all_implemented(self):
+        ''' Never advertise a hash we cannot actually sign with (SHA1 was dropped) '''
+
+        from src.app import _APDU_HASH
+        advertised = {a.strip() for a in get('/version')['hashAlgorithms'].split(',')}
+        self.assertEqual(advertised, set(_APDU_HASH))
+        self.assertNotIn('SHA1', advertised)
+
     def test_close_returns_bare_string_body(self):
         ''' /close answers with an unquoted string body despite the JSON content type '''
 
@@ -175,19 +183,20 @@ class TestGenSpkacEndpoint(unittest.TestCase):
 
     def setUp(self):
         set_ui_provider(FakeUI(pin='1234'))
-        self.patchers = [
-            patch('src.app.detector.auto_detect_library', return_value='/fake/pkcs11.so'),
-            patch('src.app.hardware.load_pkcs11', return_value=object()),
-            patch('src.app.hardware.get_slots', return_value=[0]),
-            patch('src.app.hardware.generate_spkac', return_value='UEtDUzEwREFUQQ=='),
-        ]
-        for p in self.patchers:
-            p.start()
+        # No hardware mock spies: inject a fake PKCS#11 table via the seam, so
+        # the real hardware.generate_spkac runs against the fake token.
+        from mocks import MockLoader
+        import src.app as app_mod
+        import src.hardware as hardware
+        self.loader = MockLoader('mock-lib')
+        self.token = self.loader.token
+        self._app_mod = app_mod
+        self._orig_load = app_mod._load_pkcs11
+        app_mod._load_pkcs11 = lambda: hardware.load_pkcs11('mock-lib', loader=self.loader)
 
     def tearDown(self):
         set_ui_provider(None)
-        for p in self.patchers:
-            p.stop()
+        self._app_mod._load_pkcs11 = self._orig_load
 
     def _valid_jws(self, key_size=2048):
         cert = build_cert(aki=self.ADMIN_CERT_AKI,
@@ -197,15 +206,18 @@ class TestGenSpkacEndpoint(unittest.TestCase):
     def test_valid_request_returns_pkcs10(self):
         res = post('/genSPKAC', {'jwsData': self._valid_jws()})
         self.assertEqual(res['status'], 'ok')
-        self.assertEqual(res['pkcs10Data'], 'UEtDUzEwREFUQQ==')
+        # the real generate_spkac ran against the fake token and produced a
+        # non-trivial base64 SPKAC payload
+        import base64
+        self.assertGreater(len(base64.b64decode(res['pkcs10Data'])), 32)
 
     def test_requested_key_size_reaches_the_card(self):
         ''' A 3072-bit request (current B-Trust cards) must not silently become 2048 '''
 
         res = post('/genSPKAC', {'jwsData': self._valid_jws(key_size=3072)})
         self.assertEqual(res['status'], 'ok')
-        from src.app import hardware
-        self.assertEqual(hardware.generate_spkac.call_args.kwargs['key_size_bits'], 3072)
+        # the fake token recorded the CKA_MODULUS_BITS the keygen actually requested
+        self.assertEqual(self.token.last_keygen_bits, 3072)
 
     def test_invalid_key_size_returns_biss_envelope(self):
         ''' A junk keySize must produce a 400 T-envelope, not a raw 500 '''

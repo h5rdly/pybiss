@@ -171,6 +171,95 @@ class TestTrustInstructions(unittest.TestCase):
             self.assertFalse(any(wrong_cmd in f for f in flat), f'{present_dir}: wrong {wrong_cmd}')
 
 
+class TestBrowserTrustStatus(unittest.TestCase):
+    '''
+    browser_trust_status drives the dashboard's first-run offer: 'untrusted'
+    prompts, 'trusted'/'unavailable' stay quiet. Real fakes throughout - a
+    scripted run() seam and swapped module attributes, restored in tearDown.
+    '''
+
+    PEM = ('-----BEGIN CERTIFICATE-----\n'
+           'AAAABBBBCCCC\nDDDD\n'
+           '-----END CERTIFICATE-----\n')
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.cert = os.path.join(self.tmp, 'localhost.pem')
+        with open(self.cert, 'w') as fh:
+            fh.write(self.PEM)
+
+        import shutil
+        self._orig_dbs = transport._nss_trust_dbs
+        self._orig_which = shutil.which
+        self._shutil = shutil
+        transport._nss_trust_dbs = lambda: ['sql:/fake/nssdb', 'sql:/fake/firefox']
+        shutil.which = lambda name: '/usr/bin/certutil' if name == 'certutil' else None
+
+    def tearDown(self):
+        transport._nss_trust_dbs = self._orig_dbs
+        self._shutil.which = self._orig_which
+
+    class _Result:
+        def __init__(self, returncode, stdout=b''):
+            self.returncode, self.stdout = returncode, stdout
+
+    def _run_returning(self, per_db):
+        ''' Fake subprocess.run: answers by the -d argument, records the calls '''
+
+        calls = []
+
+        def run(cmd, capture_output=False):
+            calls.append(cmd)
+            db = cmd[cmd.index('-d') + 1]
+            return per_db[db]
+
+        return run, calls
+
+    @unittest.skipIf(sys.platform in ('darwin', 'win32'), 'NSS status is POSIX-only')
+    def test_all_stores_current_is_trusted(self):
+        run, calls = self._run_returning({
+            'sql:/fake/nssdb': self._Result(0, self.PEM.encode()),
+            'sql:/fake/firefox': self._Result(0, self.PEM.encode()),
+        })
+        self.assertEqual(transport.browser_trust_status(self.cert, run=run), 'trusted')
+        self.assertEqual(len(calls), 2)                   # every store was checked
+
+    @unittest.skipIf(sys.platform in ('darwin', 'win32'), 'NSS status is POSIX-only')
+    def test_missing_in_one_store_is_untrusted(self):
+        run, _ = self._run_returning({
+            'sql:/fake/nssdb': self._Result(0, self.PEM.encode()),
+            'sql:/fake/firefox': self._Result(255),       # nickname not found
+        })
+        self.assertEqual(transport.browser_trust_status(self.cert, run=run), 'untrusted')
+
+    @unittest.skipIf(sys.platform in ('darwin', 'win32'), 'NSS status is POSIX-only')
+    def test_stale_cert_in_store_is_untrusted(self):
+        ''' A re-minted localhost cert must count as untrusted, not "present" '''
+
+        stale = self.PEM.replace('AAAA', 'ZZZZ')
+        run, _ = self._run_returning({
+            'sql:/fake/nssdb': self._Result(0, stale.encode()),
+            'sql:/fake/firefox': self._Result(0, stale.encode()),
+        })
+        self.assertEqual(transport.browser_trust_status(self.cert, run=run), 'untrusted')
+
+    @unittest.skipIf(sys.platform in ('darwin', 'win32'), 'NSS status is POSIX-only')
+    def test_no_stores_is_unavailable(self):
+        transport._nss_trust_dbs = lambda: []
+        self.assertEqual(transport.browser_trust_status(self.cert), 'unavailable')
+
+    @unittest.skipIf(sys.platform in ('darwin', 'win32'), 'NSS status is POSIX-only')
+    def test_no_certutil_is_unavailable(self):
+        self._shutil.which = lambda name: None
+        self.assertEqual(transport.browser_trust_status(self.cert), 'unavailable')
+
+    def test_pem_body_normalises_whitespace_and_ignores_trailers(self):
+        wrapped = ('junk header\n-----BEGIN CERTIFICATE-----\n  AAAABBBBCCCC  \nDDDD\n'
+                   '-----END CERTIFICATE-----\ntrailing noise\n')
+        self.assertEqual(transport._pem_body(wrapped), transport._pem_body(self.PEM))
+        self.assertEqual(transport._pem_body('no pem here'), '')
+
+
 # Local copy of the DER length helper for the signature test above
 def _der_len(n: int) -> bytes:
     if n < 0x80:

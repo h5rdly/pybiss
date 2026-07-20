@@ -1,5 +1,4 @@
-import os, sys, socket, secrets, hashlib, shutil, subprocess, time
-
+import os, sys, socket, secrets, hashlib, shutil, subprocess, time, glob
 
 from .sc_apdu import pad_pkcs1_v15_sha256
 
@@ -291,3 +290,106 @@ def install_trust_anchor(cert_path: str, assume_yes: bool = False) -> bool:
             print(f'[!] Command failed ({" ".join(cmd)}): {e}')
             return False
     return True
+
+
+_TRUST_NICK = 'pybiss localhost'
+
+
+def _nss_trust_dbs() -> list:
+    '''
+    NSS databases the browsers on this machine actually consult
+    '''
+
+    dbs = []
+    pki = os.path.expanduser('~/.pki/nssdb')
+    if os.path.isdir(pki):
+        dbs.append('sql:' + pki)                      # Chrome / Brave / Chromium
+    for prof in glob.glob(os.path.expanduser('~/.mozilla/firefox/*')):
+        if os.path.exists(os.path.join(prof, 'cert9.db')):
+            dbs.append('sql:' + prof)                 # a Firefox profile
+    return dbs
+
+
+def _pem_body(text: str) -> str:
+    ''' The base64 payload of the first PEM certificate block, whitespace-stripped '''
+
+    inside, out = False, []
+    for line in text.splitlines():
+        if '-----BEGIN CERTIFICATE-----' in line:
+            inside = True
+            continue
+        if '-----END CERTIFICATE-----' in line:
+            break
+        if inside:
+            out.append(line.strip())
+    return ''.join(out)
+
+
+def browser_trust_status(cert_path: str, run=None) -> str:
+    ''' Is the CURRENT localhost cert trusted in every browser store on this box '''
+
+    if sys.platform in ('darwin', 'win32'):
+        return 'unavailable'             # keychain/CAPI: install-only, no cheap re-read
+    if not shutil.which('certutil'):
+        return 'unavailable'
+    dbs = _nss_trust_dbs()
+    if not dbs:
+        return 'unavailable'
+
+    run = run or subprocess.run
+    with open(cert_path) as fh:
+        want = _pem_body(fh.read())
+    for db in dbs:
+        r = run(['certutil', '-d', db, '-L', '-n', _TRUST_NICK, '-a'], capture_output=True)
+        got = r.stdout.decode(errors='replace') if r.returncode == 0 else ''
+        # Compare the actual cert bytes, so a re-minted cert reads as untrusted.
+        if _pem_body(got) != want:
+            return 'untrusted'
+    
+    return 'trusted'
+
+
+def install_browser_trust(cert_path: str) -> tuple:
+    '''
+    Make the browser trust the localhost cert, without sudo, so the local HTTPS
+    daemon is reachable from a portal page
+    '''
+
+    if sys.platform == 'darwin':
+        cmd = ['security', 'add-trusted-cert', '-r', 'trustRoot',
+               '-k', os.path.expanduser('~/Library/Keychains/login.keychain-db'), cert_path]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            return True, 'Trusted in the macOS login keychain.'
+        except Exception as e:
+            return False, f'Keychain trust failed: {e}'
+
+    if sys.platform == 'win32':
+        try:
+            subprocess.run(['certutil', '-addstore', '-user', 'Root', cert_path],
+                           check=True, capture_output=True)
+            return True, 'Trusted in the Windows per-user Root store.'
+        except Exception as e:
+            return False, f'Windows trust failed: {e}'
+
+    # Linux / BSD - the NSS stores browsers keep per-user.
+    if not shutil.which('certutil'):
+        return False, ('certutil not found. Install the NSS tools (Arch: `nss`, '
+                       'Debian/Ubuntu: `libnss3-tools`) and try again.')
+    dbs = _nss_trust_dbs()
+    if not dbs:
+        return False, ('No browser cert store found (~/.pki/nssdb or a Firefox '
+                       'profile). Open your browser once so it is created, then retry.')
+
+    trusted = []
+    for db in dbs:
+        # Replace any prior copy so re-running is idempotent (ignore delete errors).
+        subprocess.run(['certutil', '-d', db, '-D', '-n', _TRUST_NICK], capture_output=True)
+        r = subprocess.run(['certutil', '-d', db, '-A', '-t', 'C,,',
+                            '-n', _TRUST_NICK, '-i', cert_path], capture_output=True)
+        if r.returncode != 0:
+            return False, f'certutil failed for {db}: {r.stderr.decode(errors="replace").strip()[:200]}'
+        trusted.append(db.replace('sql:', ''))
+
+    return True, ('Trusted for the browser. Restart the browser to pick it up.\n\n' +
+                  '\n'.join(trusted))

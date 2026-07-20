@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
 from src.app import app
+from src import app as app_mod
 from src.sc_apdu import pad_pkcs1_v15_sha256
 from src.ui_bridge import set_ui_provider
 
@@ -63,25 +64,28 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         self.signer_der = build_cert(cn='Signer', ski='01' * 20)
         self.server_der = build_cert(cn='B-Trust Server', ski='02' * 20)
 
-        set_ui_provider(FakeUI())
+        self.ui = FakeUI()
+        set_ui_provider(self.ui)
 
-        # PKCS#11/detector still need patching until the phase-3 backend
-        # resolver gives app.py a real injection seam
-        self.patchers = [
-            patch('src.app.detector.auto_detect_library', return_value='/fake/pkcs11.so'),
-            patch('src.app.hardware.load_pkcs11', return_value=object()),
-            patch('src.app.hardware.get_slots', return_value=[0]),
-            patch('src.app.hardware.get_certificates',
-                  return_value=[{'der': self.signer_der, 'id': b'\x01'}]),
-            patch('src.app.hardware.sign_payload', return_value=b'FAKE_CARD_SIGNATURE'),
-        ]
-        self.mocks = [p.start() for p in self.patchers]
-        self.sign_mock = self.mocks[-1]
+        # No hardware/detector mock spies
+        from mocks import MockLoader
+        import src.hardware as hardware
+        self.loader = MockLoader('mock-lib')
+        self.token = self.loader.token
+        self.token.mock_certs = [{'handle': 777, 'id': b'\x01', 'der': self.signer_der}]
+
+        self._orig_load = app_mod._load_pkcs11
+        app_mod._load_pkcs11 = lambda: hardware.load_pkcs11('mock-lib', loader=self.loader)
+
+        # Neutralise ambient ATR detection so backend selection is deterministic
+        # and never touches the real reader (matches a CI box with no card)
+        self._orig_detected = app_mod._detected_atr
+        app_mod._detected_atr = lambda: ''
 
     def tearDown(self):
         set_ui_provider(None)
-        for p in self.patchers:
-            p.stop()
+        app_mod._load_pkcs11 = self._orig_load
+        app_mod._detected_atr = self._orig_detected
 
     async def test_sign_happy_path(self):
         ''' Valid portal request -> verified, confirmed, signed, BISS envelope out '''
@@ -92,25 +96,35 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 200)
         data = json.loads(resp)
         self.assertEqual(data['status'], 'ok')
-        self.assertEqual(data['signatures'],
-                         [base64.b64encode(b'FAKE_CARD_SIGNATURE').decode()])
-        # The card was asked to sign the document itself
-        self.assertEqual(self.sign_mock.call_args.kwargs['payload'], self.document)
+        # the fake token returns a 256-byte signature beginning AA BB CC
+        sig = base64.b64decode(data['signatures'][0])
+        self.assertEqual(len(sig), 256)
+        self.assertEqual(sig[:3], b'\xAA\xBB\xCC')
+        # the card was asked to sign the document itself (CKM_SHA256_RSA_PKCS)
+        self.assertEqual(self.token.last_signed_data, self.document)
 
     async def test_whitelisted_apdu_card_falls_through_to_pkcs11(self):
         '''
-        A validated / whitelisted card resolves to [apdu, pkcs11] on Linux, but
-        APDU signing is not enabled yet - it must fall through to PKCS#11 and
-        still sign
+        A whitelisted card resolves to [apdu, pkcs11] on Linux. When no
+        APDU-capable card is actually reachable (the backend raises
+        BackendUnavailable), signing must fall through to PKCS#11 and still
+        succeed. (When an APDU card IS present, _sign_apdu handles it - covered
+        by the driver/backend tests.)
         '''
 
+        import src.backends as backends_mod
         atr = '3B7F96000080318065B0855956FB120FFE829000'
         from src.app import config
         orig = config.parser.get('Settings', 'apduWhitelist', fallback=None)
         config.parser.set('Settings', 'apduWhitelist', atr)
+
+        def apdu_unavailable(*a, **k):
+            raise backends_mod.BackendUnavailable('no APDU card reachable')
+
+        app_mod._detected_atr = lambda: atr        # this card IS detected + whitelisted
         try:
-            with patch('src.app.detector.get_connected_atrs', return_value=[atr]), \
-                 patch('src.app.sys.platform', 'linux'):
+            with patch('src.app.sys.platform', 'linux'), \
+                 patch.dict('src.app._SIGN', {'apdu': apdu_unavailable}):
                 body = portal_sign_request(self.document, self.signer_der, self.server_der)
                 status, resp = await http_post('/sign', body)
         finally:
@@ -120,8 +134,8 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
                 config.parser.set('Settings', 'apduWhitelist', orig)
 
         data = json.loads(resp)
-        self.assertEqual(data['status'], 'ok')          # signed despite APDU being first
-        self.sign_mock.assert_called()                  # via the PKCS#11 fallthrough
+        self.assertEqual(data['status'], 'ok')          # signed via the PKCS#11 fallthrough
+        self.assertEqual(self.token.last_signed_data, self.document)
 
     async def test_bad_server_signature_never_reaches_the_card(self):
         ''' A tampered server signature is rejected before any signing happens '''
@@ -134,7 +148,7 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data['status'], 'error')
         self.assertEqual(data['reasonCode'], 403)
         self.assertEqual(data['signatures'], [])
-        self.sign_mock.assert_not_called()
+        self.assertIsNone(self.token.last_signed_data)
 
     async def test_user_refusal_aborts_signing(self):
         set_ui_provider(FakeUI(confirm=False))
@@ -144,7 +158,7 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         data = json.loads(resp)
         self.assertEqual(data['status'], 'error')
         self.assertEqual(data['signatures'], [])
-        self.sign_mock.assert_not_called()
+        self.assertIsNone(self.token.last_signed_data)
 
     async def test_unknown_signer_certificate_rejected(self):
         ''' Requesting a cert that is not on the card yields 404, no signing '''
@@ -155,8 +169,46 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
 
         data = json.loads(resp)
         self.assertEqual(data['reasonCode'], 404)
-        self.sign_mock.assert_not_called()
+        self.assertIsNone(self.token.last_signed_data)
+
+    async def test_plain_confirm_text_is_shown_verbatim(self):
+        body = portal_sign_request(self.document, self.signer_der, self.server_der)
+        body['confirmText'] = ['Please authorize this signature']
+        await http_post('/sign', body)
+        self.assertEqual(self.ui.last_confirm_text, 'Please authorize this signature')
+
+    async def test_hash_sentinel_shows_the_content_tail_not_the_word(self):
+        ''' confirmText=="hash" means "content is a hash": show its tail, like the daemon '''
+
+        body = portal_sign_request(self.document, self.signer_der, self.server_der)
+        body['confirmText'] = ['hash']
+        await http_post('/sign', body)
+
+        content_b64 = body['contents'][0]
+        self.assertEqual(self.ui.last_confirm_text, '...' + content_b64[-20:])
+        self.assertNotEqual(self.ui.last_confirm_text.lower(), 'hash')
+
+    async def test_additional_confirm_text_is_forwarded(self):
+        body = portal_sign_request(self.document, self.signer_der, self.server_der)
+        body['additionalConfirmText'] = 'Amount: 100 BGN'
+        await http_post('/sign', body)
+        self.assertEqual(self.ui.last_confirm_additional, 'Amount: 100 BGN')
 
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class TestSignApduHashGuard(unittest.TestCase):
+    ''' _sign_apdu rejects unsupported hash algorithms before touching the card '''
+
+    def test_unsupported_hash_returns_400(self):
+        from src.app import _sign_apdu
+        r = _sign_apdu(['deadbeef'], 'MD5', b'\x30\x82', ui_provider=None)
+        self.assertEqual(r['status'], 'error')
+        self.assertEqual(r['reasonCode'], 400)
+
+    def test_supported_hash_map(self):
+        from src.app import _APDU_HASH
+        self.assertEqual(_APDU_HASH['SHA256'], ('sha256', 0x42))
+        self.assertEqual(_APDU_HASH['SHA512'], ('sha512', 0x62))

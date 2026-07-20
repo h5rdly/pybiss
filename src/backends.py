@@ -32,6 +32,19 @@ def apdu_whitelist(config=None) -> set:
     return {a.strip().upper() for a in raw.split(',') if a.strip()}
 
 
+def known_apdu_atrs() -> set:
+    '''
+    ATRs the raw-APDU driver is explicitly written for: the IDPrime families
+    B-Trust issues. Unknown families still need the explicit apduWhitelist opt-in.
+    '''
+
+    try:
+        from .cards import IDPRIME_ATRS
+    except Exception:                    # keep resolve() usable if the driver can't import
+        return set()
+    return {a.upper() for a in IDPRIME_ATRS}
+
+
 def _primary(platform: str, sign_api: str) -> str:
     ''' The user-selected primary signing engine '''
 
@@ -52,7 +65,9 @@ def resolve(operation: str, provider: str = None, atr: str = None,
     sign_api = cfg.get('signAPI', 'PKCS11') if cfg else 'PKCS11'
     primary = _primary(platform, sign_api)
 
-    whitelisted = (atr or '').upper() in apdu_whitelist(cfg)
+    # Known IDPrime-family cards are auto-trusted; strangers need the config opt-in.
+    atr_up = (atr or '').upper()
+    whitelisted = atr_up in apdu_whitelist(cfg) or atr_up in known_apdu_atrs()
 
     if platform == 'win32':
         # Windows - keep the OS engines first, APDU is a fallback

@@ -11,6 +11,8 @@ settings.ini
 biss_portal_traffic.jsonl
 __pycache__/
 
+ca_cache/
+
 build/
 dist/
 *.egg-info/

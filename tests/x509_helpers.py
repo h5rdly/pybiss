@@ -61,14 +61,46 @@ def name(cn: str) -> bytes:
     return seq(tlv(0x31, seq(oid('2.5.4.3'), utf8(cn))))
 
 
+# Standard X.500 / PKCS#9 attribute OIDs for building a realistic subject
+_SUBJECT_OIDS = {
+    'country': '2.5.4.6', 'organization': '2.5.4.10', 'common_name': '2.5.4.3',
+    'serial_number': '2.5.4.5', 'given_name': '2.5.4.42', 'surname': '2.5.4.4',
+    'email': '1.2.840.113549.1.9.1',
+}
+
+
+def full_name(**attrs) -> bytes:
+    '''
+    Multi-RDN X.500 name from identity fields (in the order given). Keys:
+    country, organization, common_name, serial_number, given_name, surname,
+    email. Mirrors the layout of a real B-Trust QES subject.
+    '''
+
+    rdns = [tlv(0x31, seq(oid(_SUBJECT_OIDS[k]), utf8(v)))
+            for k, v in attrs.items() if v is not None]
+    return seq(*rdns)
+
+
 # --- Certificate builder ---
+
+def aia_extension(*ca_issuer_urls: str) -> bytes:
+    '''
+    A real Authority Information Access extension (OID 1.3.6.1.5.5.7.1.1) listing
+    each URL as a caIssuers AccessDescription with a [6] URI GeneralName
+    '''
+
+    descriptions = [seq(oid('1.3.6.1.5.5.7.48.2'), tlv(0x86, url.encode()))
+                    for url in ca_issuer_urls]
+    return seq(oid('1.3.6.1.5.5.7.1.1'), octet(seq(*descriptions)))
+
 
 def build_cert(n: int = TEST_N, e: int = TEST_E, cn: str = 'Test', aki: str = None,
                ski: str = None, ext_texts: dict = None,
-               not_before: str = '250101000000Z', not_after: str = '400101000000Z') -> bytes:
+               not_before: str = '250101000000Z', not_after: str = '400101000000Z',
+               subject: bytes = None, serial: int = 1, raw_exts: list = None) -> bytes:
     '''
-    Returns a DER certificate. aki/ski are hex key identifiers;
-    ext_texts maps dotted OIDs to UTF8String extension payloads.
+    Returns a DER certificate. aki/ski are hex key identifiers. 
+    ext_texts maps dotted OIDs to UTF8String extension payloads 
     '''
 
     exts = []
@@ -78,6 +110,7 @@ def build_cert(n: int = TEST_N, e: int = TEST_E, cn: str = 'Test', aki: str = No
         exts.append(seq(oid('2.5.29.14'), octet(octet(bytes.fromhex(ski)))))
     for o, text in (ext_texts or {}).items():
         exts.append(seq(oid(o), octet(utf8(text))))
+    exts.extend(raw_exts or [])
 
     rsa_alg = seq(oid('1.2.840.113549.1.1.11'), tlv(0x05, b''))
     spki = seq(
@@ -86,11 +119,11 @@ def build_cert(n: int = TEST_N, e: int = TEST_E, cn: str = 'Test', aki: str = No
     )
 
     tbs = seq(
-        integer(1),                                    # serial
+        integer(serial),                               # serial
         rsa_alg,                                       # signature algorithm
         name(cn + ' Issuer'),
         seq(utctime(not_before), utctime(not_after)),  # validity
-        name(cn),
+        subject if subject is not None else name(cn),
         spki,
         tlv(0xA3, seq(*exts)) if exts else b'',
     )

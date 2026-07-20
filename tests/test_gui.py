@@ -248,6 +248,31 @@ class TestDashboardWiring(unittest.TestCase):
     def test_admin_path_reads_slots_dynamically(self):
         self.assertIn('get_slots', self.source)
 
+    def test_websites_view_is_built_and_navigable(self):
+        # The view must be constructed AND reachable from the sidebar - building
+        # one without the other leaves a dead tab or a KeyError on click.
+        self.assertIn('_build_websites_view', self.source)
+        self.assertIn("'websites'", self.source)
+
+    def test_verify_flow_runs_the_real_checker_tool(self):
+        # The in-app dry run must reuse tools/check_registrar_flow.py, not fork
+        # a second implementation of the portal's probe sequence.
+        self.assertIn('check_registrar_flow.py', self.source)
+
+    def test_every_detector_call_exists(self):
+        ''' scan_card called detector.get_readers(), which did not exist -
+            the Scan button AttributeError'd on click. Pin that every
+            detector.X the dashboard calls is actually defined. '''
+
+        from src import detector
+        called = {
+            n.func.attr for n in ast.walk(self.tree)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name) and n.func.value.id == 'detector'
+        }
+        missing = sorted(c for c in called if not hasattr(detector, c))
+        self.assertEqual(missing, [], f'dashboard calls detector.{missing} which do not exist')
+
 
     def test_destroy_deactivates_gui_routing(self):
         ''' The GUI is the queue's only consumer; if the flag outlives it,
@@ -267,6 +292,28 @@ class TestDashboardWiring(unittest.TestCase):
                 self.assertTrue(calls, 'destroy() no longer flips the GUI flag')
                 return
         self.fail('DesktopDashboard.destroy() is gone - the dead-GUI deadlock is back')
+
+
+@unittest.skipUnless(_TK_IMPORTABLE, 'dashboard module needs tkinter importable')
+class TestKnownPortals(unittest.TestCase):
+    ''' The Websites tab is data-driven; pin the data's shape and provenance '''
+
+    def test_entries_are_well_formed(self):
+        from src.dashboard import KNOWN_PORTALS
+        self.assertTrue(KNOWN_PORTALS)
+        for p in KNOWN_PORTALS:
+            self.assertTrue(p['name'])
+            self.assertTrue(p['url'].startswith('https://'), p['url'])
+            self.assertTrue(p['note'])
+            if 'test_url' in p:
+                self.assertTrue(p['test_url'].startswith('https://'), p['test_url'])
+
+    def test_registrar_is_listed_with_its_test_page(self):
+        from src.dashboard import KNOWN_PORTALS
+        registrar = [p for p in KNOWN_PORTALS if 'registryagency.bg' in p['url']]
+        self.assertEqual(len(registrar), 1)
+        self.assertEqual(registrar[0]['test_url'],
+                         'https://portal.registryagency.bg/test-signature')
 
 
 # Layer 2: composite widgets - display required, mainloop NOT required

@@ -8,15 +8,16 @@ BISS_WIN_URL = 'https://www.b-trust.bg/attachments/BtrustPrivateFile/22/docs/Bis
 
 ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'assets')
 
-# Pinned SHA-256 of vetted driver builds. A mismatch means B-Trust published
-# a new build - vet it manually before adding its hash here.
+# Pinned SHA-256 of vetted driver builds
 KNOWN_DRIVER_SHA256 = {
-    # 'libcvP11.so': '<sha256 of vetted build>',
-    # 'cvP11.dll': '<sha256 of vetted build>',
+    'libcvP11.so': '4e6c6dd010c451d93fe6796d7e1e0b89763d86836a91ba0b03f85c226174b24c',
+    'libIDPrimePKCS11.so': '43466a32e976412564e96296a5e509caa9bca7adb4dd06655432b66b4351bb52',
+    'cvP11.dll': '39bb28b04245eaa961842a6bbfe5c389dcc03f2e9fd06d8238d8edf92ddab658',
+    'cmP11.dll': 'cafe306a4716af9075d476cb6ef7ed22d8c6160a015be7773d612a61d2bc52ba',
+    'IDPrimePKCS11.dll': '044fd35c0918af96943d3ee73006a209297dc1dc6e338f6ddccb11f8b9323bd5',
+    'IDPrimePKCS11_940.dll': 'ae03617c39f8d0fd08a0ce98519f90303d558c959b6077d9bd207761c809ba02',
+    'j2pkcs11.dll': '17c224932fa9189db9748e1a333775869a049e735a4b59fd8d71cf3b18503bcc',
 }
-
-# NOTE: these downloads fetch and store executable code. Callers should get
-# explicit user consent before invoking them.
 
 
 def _verify_and_write(data: bytes, driver_name: str, output_path: str):

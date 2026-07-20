@@ -99,10 +99,24 @@ def _walk_chain(leaf_der: bytes, leaf_meta: dict, parsed: list) -> tuple[list[by
     return chain, current
 
 
-def build_certificate_chain(leaf_der: bytes, candidates: list[bytes]) -> list[bytes]:
+def build_certificate_chain(leaf_der: bytes, candidates: list[bytes], resolver=None) -> list[bytes]:
     ''' Orders certificates leaf -> intermediate(s) -> root '''
 
-    return _walk_chain(leaf_der, get_x509_metadata(leaf_der), _parse_candidates(candidates))[0]
+    parsed = _parse_candidates(candidates)
+    leaf_meta = get_x509_metadata(leaf_der)
+    chain, tail = _walk_chain(leaf_der, leaf_meta, parsed)
+
+    while resolver and not _is_self_signed(tail) and len(chain) < 8:
+        issuer_der = resolver(chain[-1])
+        if not issuer_der:
+            break
+        parsed.append((issuer_der, get_x509_metadata(issuer_der)))
+        grown, tail = _walk_chain(leaf_der, leaf_meta, parsed)
+        if len(grown) <= len(chain):        # resolver gave nothing that extends the chain
+            break
+        chain = grown
+
+    return chain
 
 
 def chain_exists_for_key_identifier(key_identifier: str, candidates: list[bytes]) -> bool:

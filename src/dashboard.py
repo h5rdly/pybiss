@@ -1,9 +1,8 @@
-import os, sys, logging, tkinter as tk, base64, threading, queue
+import os, sys, logging, subprocess, tkinter as tk, base64, threading, queue
 from tkinter import filedialog
 
-
-from . import detector
-from . import hardware
+from . import detector, hardware, transport
+from .app import CERTS_DIR
 from .config import config
 from .i18n import _
 from .app import app as api_server
@@ -13,6 +12,24 @@ from .tkinter_mods import (
     set_dark_titlebar, Toplevel, Textbox, Listbox, Entry
 )
 from .ui_bridge import ui_task_queue, set_gui_active
+
+
+# Portals known to speak the B-Trust BISS protocol 
+KNOWN_PORTALS = [
+    {
+        'name': 'Commercial Register (Registry Agency)',
+        'url': 'https://portal.registryagency.bg/en/',
+        'test_url': 'https://portal.registryagency.bg/test-signature',
+        'note': 'Company registration and filings. Log in with the QES option; '
+                'the page talks to PyBISS on localhost.',
+    },
+    {
+        'name': 'B-Trust Web Signing Portal (Borica)',
+        'url': 'https://wsp.b-trust.bg/WSP/?lang=en',
+        'note': "Borica's own document-signing page - the official daemon's "
+                'default portal.',
+    },
+]
 
 
 class DesktopDashboard(Window):
@@ -48,6 +65,8 @@ class DesktopDashboard(Window):
         self._build_home_view()
         self._build_logs_view()
         self._build_admin_view()
+        self._build_diagnostics_view()
+        self._build_websites_view()
         self._build_settings_view()
 
         # Start on Home
@@ -56,6 +75,46 @@ class DesktopDashboard(Window):
         self._auto_tail_logs()
         # Start checking the queue
         self._monitor_ui_queue()
+        # First run: offer (never silently apply) the browser-trust install
+        self._offer_browser_trust_async()
+
+
+    def _offer_browser_trust_async(self):
+        ''' First launch only '''
+
+        if config.get_bool('trustPromptShown', fallback=False):
+            return
+        self._trust_status = None
+
+        def work():
+            from . import transport
+            certs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'certs')
+            try:
+                cert_path, _key = transport.ensure_localhost_cert(certs_dir, announce=False)
+                self._trust_status = transport.browser_trust_status(cert_path)
+            except Exception:
+                self._trust_status = 'unavailable'
+
+        threading.Thread(target=work, daemon=True).start()
+        self.after(1500, self._poll_trust_offer)
+
+
+    def _poll_trust_offer(self, tries: int = 0):
+        status = getattr(self, '_trust_status', None)
+        if status is None:
+            if tries < 10:
+                self.after(1000, lambda: self._poll_trust_offer(tries + 1))
+            return
+        if status != 'untrusted':
+            return           # already trusted, or no store to write - nothing to offer
+        config.set('trustPromptShown', 'yes')   # one offer ever, even if declined
+        if MessageBox.askyesno(
+                "Trust PyBISS in your browser?",
+                "Signing portals (like the company registrar) reach PyBISS over "
+                "local HTTPS, and your browser does not trust its certificate yet.\n\n"
+                "Trust it now? This writes only your own browser's certificate "
+                "store - no sudo, reversible, one click."):
+            self._ui_trust_cert()
 
 
     def destroy(self):
@@ -107,6 +166,8 @@ class DesktopDashboard(Window):
             ('home', f'🏠  {_("dash_title").split()[0]}'), # Grabs just the first word for compactness
             ('logs', f'📄  {_("tray_log_file")}'), 
             ('admin', '🛠️  Administration'),
+            ('diagnostics', '🔬  Diagnostics'),
+            ('websites', '🌐  Websites'),
             ('settings', '⚙️  Settings') # Hardcoded for now, or add to i18n.py
         ]
         
@@ -155,7 +216,7 @@ class DesktopDashboard(Window):
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(35, 5))
 
         self.status_var = tk.StringVar(value=_('status_ready'))
-        tk.Label(frame, textvariable=self.status_var, font=('Segoe UI', 12), 
+        tk.Label(frame, textvariable=self.status_var, font=('Segoe UI', 12),
                  bg=Theme.BG, fg='#2CC985').pack(anchor='w', padx=35, pady=(0, 25))
 
         btn_frame = tk.Frame(frame, bg=Theme.BG)
@@ -212,6 +273,165 @@ class DesktopDashboard(Window):
         cert_frame.pack(anchor='w', padx=35)
         
         Button(cert_frame, 'Import Certificate', self._ui_import_cert, width=160, fg_color=Theme.SURFACE).pack(side='left')
+
+
+    def _build_diagnostics_view(self):
+
+        frame = tk.Frame(self.main_container, bg=Theme.BG)
+        self.views['diagnostics'] = frame
+
+        tk.Label(frame, text='Card Diagnostics', font=('Segoe UI', 24, 'bold'),
+                 bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(35, 5))
+        tk.Label(frame, text='Read-only. Never touches the PIN retry counter.',
+                 font=('Segoe UI', 11), bg=Theme.BG, fg='#2CC985').pack(anchor='w', padx=35, pady=(0, 20))
+
+        btns = tk.Frame(frame, bg=Theme.BG)
+        btns.pack(anchor='w', padx=35)
+        Button(btns, 'Run Full Diagnostics', self.run_diagnostics, width=180).pack(side='left', padx=(0, 15))
+        Button(btns, 'Save Report + Trace', self.save_diagnostics, width=180,
+               fg_color=Theme.SURFACE).pack(side='left')
+
+        self.diag_text = Textbox(frame, width=500, height=300, font=('Consolas', 10))
+        self.diag_text.pack(pady=25, padx=35, fill='both', expand=True)
+
+
+    def diag(self, message: str = ''):
+        ''' Append to the Diagnostics pane (and the log file) '''
+
+        self.diag_text.insert('end', message + '\n')
+        self.diag_text.see('end')
+        self.update_idletasks()
+        if message.strip():
+            logging.info(f'[diag] {message}')
+
+
+    def run_diagnostics(self):
+        ''' Every read-only check the roadmap needs from a physical card, in order '''
+
+        self.diag_text.delete('1.0', 'end')
+        self._diag_report = []           # plain text, for Save
+        self._diag_trace = None          # TracingConnection, for Save
+
+        self.diag('=== 1. Direct CCID over USB (no pcscd, no middleware) ===')
+        try:
+            from . import ccid
+            readers = ccid.find_ccid_readers()
+            if not readers:
+                self.diag('    No direct-CCID reader (Linux + usbfs only, or none plugged in)')
+            for r in readers:
+                lvl = ccid.exchange_level(r['ccid']['dwFeatures'])
+                self.diag(f"    {r['name']} ({r['vid']}:{r['pid']}) - {lvl}-level exchange")
+                if not ccid.is_apdu_level(r['ccid']['dwFeatures']):
+                    self.diag('      [!] TPDU/character level - direct CCID not supported here')
+                    continue
+                try:
+                    with ccid.CcidConnection() as conn:
+                        self.diag(f'      ATR (direct): {conn.get_atr().hex().upper()}')
+                        self.diag('      [+] Card driven with zero packages installed.')
+                except ccid.CcidError as ce:
+                    self.diag(f'      [-] {ce}')
+        except Exception as e:
+            self.diag(f'[-] Direct CCID probe failed: {type(e).__name__}: {e}')
+
+        self.diag('\n=== 2. PC/SC readers + ATR ===')
+        atr = None
+        try:
+            pcsc_readers = detector.get_readers()
+            if not pcsc_readers:
+                self.diag('    No PC/SC readers (pcscd down, or no driver) - fine, see section 1')
+            for r in pcsc_readers:
+                self.diag(f'    reader    : {r}')
+            atrs = detector.get_connected_atrs()
+            if atrs:
+                atr = atrs[0]
+                provider = detector.identify_provider(atr)
+                self.diag(f'    ATR       : {atr}')
+                self.diag(f'    Vendor    : {provider or "UNKNOWN (not in ATR_MAPPINGS)"}')
+                from . import backends
+                if atr.upper() in backends.known_apdu_atrs():
+                    self.diag('    APDU path : enabled automatically (IDPrime family - '
+                              'the driver is written for this card)')
+                elif atr.upper() in backends.apdu_whitelist(config):
+                    self.diag('    APDU path : enabled (in apduWhitelist)')
+                else:
+                    self.diag('    APDU path : disabled - unknown card family')
+                    self._offer_whitelist(atr)
+        except Exception as e:
+            self.diag(f'[-] PC/SC probe failed: {type(e).__name__}: {e}')
+
+        # Vendor PKCS#11 .so files can SEGFAULT (a Gemalto IDPrime lib faults in
+        # C_GetSlotList here) - a C crash Python can't catch
+        self.diag('\n=== 3. PKCS#11 (vendor library, crash-isolated subprocess) ===')
+        try:
+            repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            proc = subprocess.run(
+                [sys.executable, '-m', 'src.dashboard', '--diag-probe'],
+                capture_output=True, text=True, timeout=30, cwd=repo_root)
+            for line in proc.stdout.splitlines():
+                self.diag(f'    {line}')
+            if proc.returncode < 0:
+                self.diag(f'    [!] vendor library CRASHED (signal {-proc.returncode}) - '
+                          'isolated; the dashboard is unaffected. This is a real bug in '
+                          'that .so or in how we call it.')
+            elif proc.stderr.strip():
+                self.diag(f'    stderr: {proc.stderr.strip().splitlines()[-1]}')
+        except subprocess.TimeoutExpired:
+            self.diag('    [!] PKCS#11 probe timed out (vendor lib hung) - isolated.')
+        except Exception as e:
+            self.diag(f'[-] PKCS#11 probe failed to launch: {type(e).__name__}: {e}')
+
+        self.diag('\n=== 4. Raw APDU: certificate discovery (read-only) ===')
+        try:
+            from .sc_ffi import SmartCardConnection
+            from .tracing import TracingConnection
+            from .cards import BTrustDriver
+
+            with SmartCardConnection() as card:
+                rec = TracingConnection(card)
+                self._diag_trace = rec
+                with rec.transaction():
+                    driver = BTrustDriver.create(rec)
+                    self.diag(f'    Driver    : {driver.__class__.__name__} (AID probe)')
+                    certs = driver.discover_certificates()
+                    self.diag(f'    Certs     : {len(certs)} discovered over APDU')
+                    for c in certs:
+                        self.diag(f'      - {c.get("label", "?")} '
+                                  f'({len(c.get("der", b""))} bytes DER, '
+                                  f'id={c.get("id", b"").hex() or "?"})')
+                    if not certs:
+                        self.diag('    [!] Zero certs over APDU but PKCS#11 may still see them - '
+                                  'that gap is exactly what needs debugging.')
+            self.diag(f'    Exchanges : {len(rec.exchanges)} APDUs recorded')
+        except Exception as e:
+            self.diag(f'[-] APDU path failed: {type(e).__name__}: {e}')
+            self.diag('    (This is the interesting failure - save the report.)')
+
+        self.diag('\n[+] Done. "Save Report + Trace" writes both files for the roadmap.')
+
+
+    def save_diagnostics(self):
+        ''' Dump the pane's text + the recorded APDU trace to disk '''
+
+        text = self.diag_text.text.get('1.0', 'end').strip()
+        if not text:
+            self.diag('[-] Run diagnostics first.')
+            return
+
+        target = filedialog.askdirectory(title='Save diagnostics into...')
+        if not target:
+            return
+
+        report = os.path.join(target, 'pybiss_diagnostics.txt')
+        with open(report, 'w', encoding='utf-8') as fh:
+            fh.write(text + '\n')
+        self.diag(f'\n[+] Report saved: {report}')
+
+        if self._diag_trace is not None and self._diag_trace.exchanges:
+            trace = os.path.join(target, 'card.trace.json')
+            self._diag_trace.save(trace)
+            self.diag(f'[+] Trace saved : {trace} '
+                      f'({len(self._diag_trace.exchanges)} exchanges)')
+            self.diag('    Drop it in tests/fixtures/ for hardware-free replay tests.')
 
 
     def _load_card(self):
@@ -285,6 +505,121 @@ class DesktopDashboard(Window):
             MessageBox.showinfo("Error", f"Import failed: {e}")
 
 
+    def _offer_whitelist(self, atr: str):
+        ''' One-click opt-in for a card family the APDU driver wasn't validated on '''
+
+        if not MessageBox.askyesno(
+                "Enable driver-free signing?",
+                "This card's family is unknown to PyBISS, so the driver-free "
+                "(APDU) path is untested on it. A PIN mismatch caused by a "
+                "wrong dialect would spend real PIN attempts.\n\n"
+                f"ATR: {atr}\n\n"
+                "Enable it anyway? (You can remove it from apduWhitelist in "
+                "settings.ini later.)"):
+            return
+        from . import backends
+        entries = backends.apdu_whitelist(config) | {atr.upper()}
+        config.set('apduWhitelist', ', '.join(sorted(entries)))
+        self.diag('    APDU path : enabled - added to apduWhitelist')
+
+
+    def _ui_trust_cert(self):
+        ''' One-click: trust the localhost cert in the browser (no terminal, no sudo) '''
+
+        from . import transport
+        certs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'certs')
+        try:
+            cert_path, _key = transport.ensure_localhost_cert(certs_dir, announce=False)
+        except Exception as e:
+            MessageBox.showinfo("Trust certificate failed", f"Could not prepare the certificate: {e}")
+            return
+        try:
+            ok, msg = transport.install_browser_trust(cert_path)
+        except Exception as e:
+            ok, msg = False, str(e)
+        MessageBox.showinfo("Trust certificate" if ok else "Trust certificate failed", msg)
+
+
+    def _build_websites_view(self):
+        ''' Known BISS portals: open them, and dry-run the registrar flow in-app '''
+
+        frame = tk.Frame(self.main_container, bg=Theme.BG)
+        self.views['websites'] = frame
+
+        tk.Label(frame, text='Known Websites', font=('Segoe UI', 24, 'bold'),
+                 bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(35, 5))
+        tk.Label(frame, text='Portals known to work with the B-Trust local signing '
+                 'protocol PyBISS implements.', font=('Segoe UI', 11),
+                 bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(0, 20))
+
+        for portal in KNOWN_PORTALS:
+            row = tk.Frame(frame, bg=Theme.SURFACE)
+            row.pack(fill='x', padx=35, pady=(0, 12))
+            tk.Label(row, text=portal['name'], font=('Segoe UI', 12, 'bold'),
+                     bg=Theme.SURFACE, fg=Theme.TEXT).pack(anchor='w', padx=15, pady=(10, 0))
+            tk.Label(row, text=portal['note'], font=('Segoe UI', 10),
+                     bg=Theme.SURFACE, fg=Theme.TEXT, wraplength=600,
+                     justify='left').pack(anchor='w', padx=15, pady=(2, 6))
+            btns = tk.Frame(row, bg=Theme.SURFACE)
+            btns.pack(anchor='w', padx=15, pady=(0, 10))
+            Button(btns, 'Open', lambda u=portal['url']: self._open_url(u),
+                   width=90).pack(side='left', padx=(0, 8))
+            if portal.get('test_url'):
+                Button(btns, 'Open Test Page', lambda u=portal['test_url']: self._open_url(u),
+                       width=130, fg_color=Theme.BG).pack(side='left', padx=(0, 8))
+                Button(btns, 'Verify Signing Flow', self._ui_verify_flow,
+                       width=150, fg_color=Theme.BG).pack(side='left')
+
+        tk.Label(frame, text='Verify replays the registrar\'s own detection and '
+                 'certificate steps against the running PyBISS - read-only, no PIN. '
+                 'Pick your certificate when the dialog pops.', font=('Segoe UI', 10),
+                 bg=Theme.BG, fg=Theme.TEXT, wraplength=650,
+                 justify='left').pack(anchor='w', padx=35, pady=(10, 5))
+        self.flow_text = Textbox(frame, width=500, height=170, font=('Consolas', 10))
+        self.flow_text.pack(padx=35, pady=(0, 20), fill='both', expand=True)
+
+
+    def _open_url(self, url: str):
+        import webbrowser
+        webbrowser.open(url)
+
+
+    def _ui_verify_flow(self):
+        ''' Dry-run the registrar's local half (tools/check_registrar_flow.py) from the GUI '''
+
+        if getattr(self, '_flow_proc', None) is not None and self._flow_proc.poll() is None:
+            return                                     # one run at a time
+        self.flow_text.delete('1.0', 'end')
+        self._flow_lines, self._flow_done = [], False
+
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        try:
+            self._flow_proc = subprocess.Popen(
+                [sys.executable, '-u', os.path.join('tools', 'check_registrar_flow.py')],
+                cwd=repo_root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+        except Exception as e:
+            self.flow_text.insert('end', f'Could not start the check: {e}\n')
+            return
+
+        def pump():
+            for line in self._flow_proc.stdout:
+                self._flow_lines.append(line.rstrip('\n'))
+            code = self._flow_proc.wait()
+            self._flow_lines.append('--- PASSED ---' if code == 0 else f'--- FAILED (exit {code}) ---')
+            self._flow_done = True
+
+        threading.Thread(target=pump, daemon=True).start()
+        self._poll_flow_output()
+
+
+    def _poll_flow_output(self):
+        while self._flow_lines:
+            self.flow_text.insert('end', self._flow_lines.pop(0) + '\n')
+            self.flow_text.see('end')
+        if not self._flow_done or self._flow_lines:
+            self.after(300, self._poll_flow_output)
+
+
     def _build_settings_view(self):
 
         frame = tk.Frame(self.main_container, bg=Theme.BG)
@@ -321,9 +656,16 @@ class DesktopDashboard(Window):
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor="w", padx=35, pady=(40, 20))
                  
         is_boot_on = config.get_bool("osStarted", fallback=True)
-        self.toggle_boot = Toggle(frame, text="Launch PyBISS on System Startup", 
+        self.toggle_boot = Toggle(frame, text="Launch PyBISS on System Startup",
                                   is_on=is_boot_on, command=self.save_boot_setting)
         self.toggle_boot.pack(anchor="w", padx=35, pady=(0, 20))
+
+        tk.Label(frame, text="Signing portals reach PyBISS over local HTTPS. Trust "
+                 "the certificate so your browser accepts it.", font=("Segoe UI", 11),
+                 bg=Theme.BG, fg=Theme.TEXT_MUTED if hasattr(Theme, 'TEXT_MUTED') else Theme.TEXT,
+                 wraplength=650, justify="left").pack(anchor="w", padx=35, pady=(0, 8))
+        Button(frame, "Trust Certificate for Browser", self._ui_trust_cert,
+               width=240, fg_color=Theme.SURFACE).pack(anchor="w", padx=35, pady=(0, 20))
 
         # Initialize visuals based on config
         self.set_lang(config.get("language", "en"), save=False)
@@ -606,14 +948,50 @@ class ModalRenderer:
         return result['confirmed']
 
 
-def main():
-    ''' Desktop dashboard + the REST API on a background daemon thread '''
+def diag_probe():
+    '''
+    Isolated PKCS#11 card probe. Runs in a process (python -m src.dashboard --diag-probe) 
+    so a segfault in the .so - a Gemalto IDPrime lib faults in C_GetSlotList - cannot take 
+    the GUI down with it.
+    '''
 
-    server_thread = threading.Thread(
-        target=lambda: api_server.run(host='127.0.0.1', port=4843),
-        daemon=True
-    )
-    server_thread.start()
+    def out(msg):
+        print(msg, flush=True)
+
+    lib = detector.auto_detect_library()
+    out(f'library   : {lib}')
+    if not lib:
+        out('[-] no vendor library resolved for this card')
+        return
+
+    funcs = hardware.load_pkcs11(lib)
+    slots = hardware.get_slots(funcs, token_present=True)
+    out(f'slots     : {slots}')
+    if not slots:
+        out('[-] no token present')
+        return
+
+    slot = slots[0]
+    out(f'serial    : {hardware.get_token_serial_number(funcs, slot_id=slot)}')
+    for k, v in hardware.get_token_info_extended(funcs, slot_id=slot).items():
+        out(f'{k:<10}: {v}')
+
+
+def main():
+    ''' Desktop dashboard + the BISS-compatible HTTPS daemon on a background thread '''
+
+    try:
+        port = transport.pick_free_port()
+        certfile, keyfile = transport.ensure_localhost_cert(CERTS_DIR, announce=False)
+        server_thread = threading.Thread(
+            target=lambda: api_server.run(host='127.0.0.1', port=port, use_ssl=True,
+                                          certfile=certfile, keyfile=keyfile),
+            daemon=True
+        )
+        server_thread.start()
+    except OSError:
+        print('No free BISS port (53952-55); is the official B-Trust daemon running? '
+              'The dashboard opened without its HTTPS listener.')
 
     # The native Desktop UI runs on the main thread (blocks until closed)
     app = DesktopDashboard()
@@ -621,4 +999,11 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    if '--diag-probe' in sys.argv:
+        try:
+            diag_probe()
+        except Exception as e:             # a clean Python error, not a crash
+            print(f'[-] PKCS#11 error: {type(e).__name__}: {e}', flush=True)
+            sys.exit(1)
+    else:
+        main()

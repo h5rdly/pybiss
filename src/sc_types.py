@@ -1,19 +1,40 @@
 import sys
 from ctypes import *
 
+'''
+Basic Type Mappings 
 
-# --- Basic Type Mappings ---
+The three PC/SC implementations do NOT agree on integer widths
+
+pcsc-lite (Linux/Alpine/FreeBSD): DWORD = unsigned long, LONG = long
+    -> 64-bit on LP64, so c_ulong / c_long are correct.
+
+Windows (LLP64): DWORD = 32-bit; C long is also 32 bits here, so c_ulong
+    happens to be right too. SCARDCONTEXT is ULONG_PTR -> pointer-sized.
+
+macOS PCSC.framework: EVERYTHING is 32-bit. Apple's headers say
+    DWORD = uint32_t, LONG = int32_t, SCARDCONTEXT/SCARDHANDLE = int32_t.
+'''
+
 if sys.platform == 'win32':
-    SCARDCONTEXT = c_void_p
+    SCARDCONTEXT = c_void_p          # ULONG_PTR
     SCARDHANDLE  = c_void_p
+    LONG  = c_long                   # 32-bit under LLP64
+    DWORD = c_ulong                  # 32-bit under LLP64
     MAX_BUFFER_SIZE_EXTENDED = 65535
-else:
+elif sys.platform == 'darwin':
+    SCARDCONTEXT = c_int32
+    SCARDHANDLE  = c_int32
+    LONG  = c_int32
+    DWORD = c_uint32
+    MAX_BUFFER_SIZE_EXTENDED = 65548 # 4 + 3 + (1<<16) + 3 + 2
+else:                                # pcsc-lite: Linux, Alpine, FreeBSD
     SCARDCONTEXT = c_long
     SCARDHANDLE  = c_long
-    MAX_BUFFER_SIZE_EXTENDED = 65548 # 4 + 3 + (1<<16) + 3 + 2
+    LONG  = c_long
+    DWORD = c_ulong
+    MAX_BUFFER_SIZE_EXTENDED = 65548
 
-LONG  = c_long
-DWORD = c_ulong
 WORD  = c_ushort
 BYTE  = c_ubyte
 

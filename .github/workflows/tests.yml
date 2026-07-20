@@ -80,16 +80,22 @@ jobs:
         uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          # dejavu because Tk's Xft text rendering needs at least one real font.
+          # Tk's Xft text rendering needs at least one real font.
           prepare: pkg install -y python314 py314-tkinter pcsc-lite xorg-vfbserver dejavu
           # Xvfb must not inherit the SSH session's stdout/stderr and must be
           # killed afterwards, or the backgrounded child keeps the session
           # open and the step hangs forever AFTER the tests pass.
+          #
+          # pcscd runs here so tests/test_pcsc_daemon.py can assert that sc_ffi's
+          # ctypes really handshake with a LIVE daemon on FreeBSD
           run: |
+            pcscd >/dev/null 2>&1
+            sleep 1
             Xvfb :99 -screen 0 1280x800x24 >/dev/null 2>&1 &
             XVFB_PID=$!
             sleep 2
-            DISPLAY=:99 python3.14 -m unittest discover tests
+            PYBISS_REQUIRE_PCSCD=1 DISPLAY=:99 python3.14 -m unittest discover tests
             rc=$?
             kill $XVFB_PID 2>/dev/null
+            pkill pcscd 2>/dev/null
             exit $rc

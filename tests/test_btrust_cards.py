@@ -4,7 +4,7 @@ sys.path.append(f'{__file__.replace('\\', '/').rsplit('/', 2)[0]}')
 
 from mocks import FakeSmartCardConnection
 from src.sc_apdu import pad_pkcs1_v15_sha256, decode_ecdsa_signature
-from src.btrust_cards import (
+from src.cards import (
     BTrustDriver, IDPrimeDriver, CardOSDriver, ScHsmDriver, BaseCardDriver, AsepcosDriver,
 )
 

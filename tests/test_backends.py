@@ -2,10 +2,11 @@ import sys, unittest
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
-from src.backends import apdu_whitelist, resolve, OP_READ, OP_SIGN, OP_PIN, OP_MANAGE
+from src.backends import apdu_whitelist, known_apdu_atrs, resolve, OP_READ, OP_SIGN, OP_PIN, OP_MANAGE
 
 
-WHITELISTED_ATR = '3B7F96000080318065B0855956FB120FFE829000'
+WHITELISTED_ATR = '3B7F96000080318065B0855956FB120FFE829000'   # IDPrime 940 (known family)
+STRANGER_ATR = '3B99999999999999999999999999999999999999'      # no family we drive
 
 
 class FakeConfig:
@@ -33,10 +34,12 @@ class TestResolveDefaults(unittest.TestCase):
         cfg = FakeConfig(signAPI='MSCAPI')
         self.assertEqual(resolve(OP_SIGN, platform='win32', config=cfg), ['cng', 'pkcs11'])
 
-    def test_no_apdu_without_whitelist_anywhere(self):
+    def test_no_apdu_for_unknown_card_without_whitelist(self):
+        # A stranger card gets no APDU path unless the user explicitly opts in.
+        # (A known IDPrime-family ATR IS auto-trusted - see TestKnownFamilyAutoTrust.)
         for plat in ('linux', 'darwin', 'win32'):
             for op in (OP_READ, OP_SIGN, OP_PIN):
-                self.assertNotIn('apdu', resolve(op, platform=plat, atr=WHITELISTED_ATR, config=FakeConfig()))
+                self.assertNotIn('apdu', resolve(op, platform=plat, atr=STRANGER_ATR, config=FakeConfig()))
 
 
 class TestResolveCapabilities(unittest.TestCase):
@@ -83,6 +86,47 @@ class TestResolveWhitelistedApdu(unittest.TestCase):
     def test_whitelist_matching_is_case_insensitive(self):
         cfg = FakeConfig(apduWhitelist=WHITELISTED_ATR.lower())
         self.assertIn('apdu', resolve(OP_SIGN, platform='linux', atr=WHITELISTED_ATR.upper(), config=cfg))
+
+
+class TestKnownFamilyAutoTrust(unittest.TestCase):
+    '''
+    The IDPrime families the APDU driver is written for are implicitly trusted:
+    a fresh install signs driver-free with zero configuration. Only unknown
+    families still need the explicit apduWhitelist opt-in.
+    '''
+
+    def test_known_atrs_come_from_the_driver(self):
+        from src.cards import IDPRIME_ATRS
+        self.assertEqual(known_apdu_atrs(), {a.upper() for a in IDPRIME_ATRS})
+
+    def test_known_family_gets_apdu_with_no_config_at_all(self):
+        self.assertEqual(resolve(OP_SIGN, platform='linux', atr=WHITELISTED_ATR, config=FakeConfig()),
+                         ['apdu', 'pkcs11'])
+
+    def test_known_family_is_case_insensitive(self):
+        self.assertIn('apdu', resolve(OP_SIGN, platform='linux',
+                                      atr=WHITELISTED_ATR.lower(), config=FakeConfig()))
+
+    def test_users_real_card_is_auto_trusted(self):
+        # The B-Trust QES MiniDriver card this project is validated against.
+        atr = '3B7F96000080318065B085050039120FFE829000'
+        self.assertEqual(resolve(OP_SIGN, platform='linux', atr=atr, config=FakeConfig()),
+                         ['apdu', 'pkcs11'])
+
+    def test_stranger_still_needs_the_explicit_opt_in(self):
+        self.assertEqual(resolve(OP_SIGN, platform='linux', atr=STRANGER_ATR, config=FakeConfig()),
+                         ['pkcs11'])
+        cfg = FakeConfig(apduWhitelist=STRANGER_ATR)
+        self.assertEqual(resolve(OP_SIGN, platform='linux', atr=STRANGER_ATR, config=cfg),
+                         ['apdu', 'pkcs11'])
+
+    def test_windows_keeps_auto_trusted_apdu_last(self):
+        self.assertEqual(resolve(OP_SIGN, platform='win32', atr=WHITELISTED_ATR, config=FakeConfig()),
+                         ['pkcs11', 'cng', 'apdu'])
+
+    def test_manage_never_routes_to_apdu_even_for_known_family(self):
+        self.assertEqual(resolve(OP_MANAGE, platform='linux', atr=WHITELISTED_ATR, config=FakeConfig()),
+                         ['pkcs11'])
 
 
 class TestApduWhitelist(unittest.TestCase):

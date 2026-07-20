@@ -32,8 +32,30 @@ ATR_MAPPINGS = {
     '3B8D0180FBA000000397425446590401CF': 'MICROSOFT_VMWARE',
 }
 
-def get_connected_atrs() -> list[str]:
-    ''' Query the OS native smart card manager and return all active card ATRs '''
+def get_readers() -> list[str]:
+    ''' Names of the connected PC/SC readers (empty if no PC/SC at all) '''
+
+    try:
+        hcontext = sc_ffi.establish_context()
+    except Exception:
+        return []  # library missing, service down, or no reader subsystem
+
+    try:
+        return sc_ffi.list_readers(hcontext)
+    finally:
+        sc_ffi.release_context(hcontext)
+
+
+def get_connected_atrs(ccid_fallback: bool = False) -> list[str]:
+    ''' All active card ATRs (upper hex) '''
+    
+    if (atrs := _pcsc_atrs()) or not ccid_fallback:
+        return atrs
+    return _ccid_atrs()
+
+
+def _pcsc_atrs() -> list[str]:
+    ''' ATRs via the OS PC/SC service. [] if PC/SC is unavailable '''
 
     atrs = []
     try:
@@ -59,52 +81,90 @@ def get_connected_atrs() -> list[str]:
     return atrs
 
 
+def _ccid_atrs() -> list[str]:
+    ''' Read ATRs read over USB CCID, no PC/SC daemon '''
+
+    try:
+        from . import ccid
+    except Exception:
+        return []
+
+    atrs = []
+    for info in ccid.find_ccid_readers():
+        try:
+            usb = ccid.CcidUsb(info)
+        except Exception:
+            continue
+        try:
+            atrs.append(usb.power_on().hex().upper())
+        except Exception:
+            pass  # empty slot, mute card, or reader busy
+        finally:
+            try:
+                usb.power_off()
+            except Exception:
+                pass
+            usb.close()
+
+    return atrs
+
+
 def identify_provider(atr: str) -> str:
     ''' Match an ATR to a known hardware provider '''
 
     return ATR_MAPPINGS.get(atr.upper())
 
 
-def get_library_path(provider: str) -> str:
-    ''' Resolve the PKCS#11 library path based on the Provider and the OS '''
-    
-    assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets')
-    
-    if sys.platform == 'win32':
-        if provider == 'GEMALTO':
-            if os.path.exists('C:/Windows/System32/eTPKCS11.dll'): return 'C:/Windows/System32/eTPKCS11.dll'
-            return os.path.join(assets_dir, 'IDPrimePKCS11_940.dll')
-        elif provider == 'BIT4ID':
-            if os.path.exists('C:/WINDOWS/system32/bit4ipki.dll'): return 'C:/WINDOWS/system32/bit4ipki.dll'
-        elif provider == 'IDEMIA':
-            if os.path.exists('c:/Windows/System32/OcsPKCS11Wrapper.dll'): return 'c:/Windows/System32/OcsPKCS11Wrapper.dll'
-        elif provider in ('CRYPTOVISION', 'SIEMENS'):
-            return os.path.join(assets_dir, 'cvP11.dll')
-            
-    elif sys.platform == 'darwin':
-        if provider == 'GEMALTO':
-            for p in ['/Library/Frameworks/eToken.framework/Versions/A/libIDPrimePKCS11.dylib', '/Library/Gemalto/libidprimepkcs11.dylib']:
-                if os.path.exists(p): return p
-        elif provider in ('CRYPTOVISION', 'SIEMENS'):
-            if os.path.exists('/Library/cv cryptovision/libcvP11.dylib'): return '/Library/cv cryptovision/libcvP11.dylib'
-        elif provider == 'BIT4ID':
-            if os.path.exists('/Library/bit4id/pkcs11/libbit4ipki.dylib'): return '/Library/bit4id/pkcs11/libbit4ipki.dylib'
-        elif provider == 'IDEMIA':
-            if os.path.exists('/Library/AWP/lib/libOcsCryptoki.dylib'): return '/Library/AWP/lib/libOcsCryptoki.dylib'
-            
-    else: # Linux
-        if provider == 'GEMALTO':
-            for p in ['/lib/libIDPrimePKCS11.so', '/usr/lib/libIDPrimePKCS11.so', '/usr/lib64/libIDPrimePKCS11.so', 
-                      '/lib/libIDPrimePKCS11.so.10', '/usr/lib/libIDPrimePKCS11.so.10', '/usr/lib64/libIDPrimePKCS11.so.10']:
-                if os.path.exists(p): return p
-        elif provider == 'BIT4ID':
-            for p in ['/usr/lib/libbit4ipki.so', '/usr/lib64/libbit4ipki.so']:
-                if os.path.exists(p): return p
-        elif provider in ('CRYPTOVISION', 'SIEMENS'):
-            for p in [os.path.join(assets_dir, 'libcvP11.so'), '/usr/lib/libcvP11.so']:
-                if os.path.exists(p): return p
+# PKCS#11 library candidates per (platform, provider) - first existing wins.
+_ASSETS = 'assets:'
 
-    return None
+_PKCS11_CANDIDATES = {
+    'win32': {
+        'GEMALTO': ['C:/Windows/System32/eTPKCS11.dll'],
+        'BIT4ID': ['C:/WINDOWS/system32/bit4ipki.dll'],
+        'IDEMIA': ['c:/Windows/System32/OcsPKCS11Wrapper.dll'],
+    },
+    'darwin': {
+        'GEMALTO': ['/Library/Frameworks/eToken.framework/Versions/A/libIDPrimePKCS11.dylib',
+                    '/Library/Gemalto/libidprimepkcs11.dylib'],
+        'CRYPTOVISION': ['/Library/cv cryptovision/libcvP11.dylib'],
+        'BIT4ID': ['/Library/bit4id/pkcs11/libbit4ipki.dylib'],
+        'IDEMIA': ['/Library/AWP/lib/libOcsCryptoki.dylib'],
+    },
+    'linux': {
+        'GEMALTO': ['/lib/libIDPrimePKCS11.so', '/usr/lib/libIDPrimePKCS11.so', '/usr/lib64/libIDPrimePKCS11.so',
+                    '/lib/libIDPrimePKCS11.so.10', '/usr/lib/libIDPrimePKCS11.so.10', '/usr/lib64/libIDPrimePKCS11.so.10'],
+        'BIT4ID': ['/usr/lib/libbit4ipki.so', '/usr/lib64/libbit4ipki.so'],
+        'CRYPTOVISION': [_ASSETS + 'libcvP11.so', '/usr/lib/libcvP11.so'],
+    },
+}
+
+# Bundled fallbacks returned even when not (yet) on disk - the Windows builds
+# ship these in assets
+_PKCS11_BUNDLED = {
+    'win32': {
+        'GEMALTO': 'IDPrimePKCS11_940.dll',
+        'CRYPTOVISION': 'cvP11.dll',
+    },
+}
+
+
+def get_library_path(provider: str) -> str:
+    ''' Resolve the PKCS#11 library path for a provider from the OS candidate table '''
+
+    assets_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), 'assets')
+    platform = sys.platform if sys.platform in ('win32', 'darwin') else 'linux'
+    if provider == 'SIEMENS':
+        provider = 'CRYPTOVISION'
+
+    for path in _PKCS11_CANDIDATES.get(platform, {}).get(provider, []):
+        if path.startswith(_ASSETS):
+            path = os.path.join(assets_dir, path[len(_ASSETS):])
+        if os.path.exists(path):
+            return path
+
+    bundled = _PKCS11_BUNDLED.get(platform, {}).get(provider)
+    return os.path.join(assets_dir, bundled) if bundled else None
 
 
 def auto_detect_library() -> str:

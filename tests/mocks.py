@@ -8,7 +8,7 @@ sys.path.append(f"{__file__.replace('\\', '/').rsplit('/', 2)[0]}")
 
 from src.pkcs11_types import (
     CKR_OK, CKR_GENERAL_ERROR, CKA_CLASS, CKA_ID, CKA_VALUE, CKO_CERTIFICATE,
-    CKO_PRIVATE_KEY, CKA_LABEL 
+    CKO_PRIVATE_KEY, CKA_LABEL, CKA_MODULUS_BITS, CK_ULONG
 )
 from src.pkcs11_funcs import (
     CK_FUNCTION_LIST, C_SignInit_t, C_DestroyObject_t,
@@ -32,6 +32,8 @@ class FakePkcs11Token:
         
         self.find_index = 0
         self.mock_certs = [{'handle': 777, 'id': b'ID_1', 'der': b'DER_DATA'}]
+        self.last_signed_data = None
+        self.last_keygen_bits = None
         
         self.f = CK_FUNCTION_LIST()
         
@@ -202,6 +204,11 @@ class FakePkcs11Token:
 
 
     def mock_C_Sign(self, hSession, pData, ulDataLen, pSignature, pulSignatureLen):
+        if pData and ulDataLen:
+            try:
+                self.last_signed_data = string_at(pData, ulDataLen)
+            except Exception:
+                pass
         if not pSignature:
             # Step 1: Return the required buffer size
             pulSignatureLen[0] = 256
@@ -245,12 +252,22 @@ class FakePkcs11Token:
 
 
     def mock_C_GenerateKeyPair(
-        self, hSession, pMechanism, pPubTpl, ulPubCount, pPrivTpl, ulPrivCount, phPubKey, 
+        self, hSession, pMechanism, pPubTpl, ulPubCount, pPrivTpl, ulPrivCount, phPubKey,
         phPrivKey):
-        
-        if phPubKey: 
+
+        # Record the requested RSA key size so tests can assert it reached the
+        # card without patching the keygen function.
+        try:
+            for i in range(ulPubCount):
+                attr = pPubTpl[i]
+                if attr.type == CKA_MODULUS_BITS and attr.pValue:
+                    self.last_keygen_bits = cast(attr.pValue, POINTER(CK_ULONG))[0]
+        except Exception:
+            pass
+
+        if phPubKey:
             phPubKey[0] = 111
-        if phPrivKey: 
+        if phPrivKey:
             phPrivKey[0] = 222
         return CKR_OK
 
@@ -433,6 +450,8 @@ class FakeUI:
         self.pin = pin
         self.choice = choice
         self.confirm = confirm
+        self.last_confirm_text = None          # what the confirm dialog was shown
+        self.last_confirm_additional = None
 
     def prompt_pin(self, attempt: int = 1, label: str = 'PIN') -> str:
         return self.pin
@@ -441,6 +460,8 @@ class FakeUI:
         return self.choice
 
     def confirm_sign(self, text: str, additional_text: str = None) -> bool:
+        self.last_confirm_text = text
+        self.last_confirm_additional = additional_text
         return self.confirm
 
 
