@@ -181,6 +181,10 @@ def verify_server_signature(payload: bytes, signature: bytes, server_cert_der: b
         if verify_rsa_pkcs1_v1_5(payload, signature, n, e, hash_alg):
             return True
 
+        # Scheme C: Signature over the content DIGEST
+        if verify_rsa_pkcs1_v1_5(payload_hash, signature, n, e, hash_alg):
+            return True
+
         return False
         
     except Exception:

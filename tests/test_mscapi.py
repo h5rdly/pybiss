@@ -1,4 +1,5 @@
 import sys, unittest
+import types
 
 from mocks import FakeMSCAPI, DummyWindowsLibrary
 
@@ -52,8 +53,12 @@ class TestMSCAPI(unittest.TestCase):
         ''' Gracefully raises if the System Store cannot be opened '''
 
         self.libs.crypt32.CertOpenStore = lambda *args: None
-        with self.assertRaises(Exception) as context:
+        context = None
+        try:
             mscapi.get_windows_certificates(libs=self.libs)
+        except Exception as _e:
+            context = types.SimpleNamespace(exception=_e)
+        assert context is not None, 'Exception not raised'
         assert "Failed to open Windows Certificate Store" in str(context.exception)
 
 
@@ -83,8 +88,12 @@ class TestMSCAPI(unittest.TestCase):
         ''' Legacy CSP hardware providers are securely rejected '''
 
         self.state.is_legacy_csp = True
-        with self.assertRaises(Exception) as context:
+        context = None
+        try:
             mscapi.sign_payload_windows(cert_ctx_pointer=123, payload=b'data', libs=self.libs)
+        except Exception as _e:
+            context = types.SimpleNamespace(exception=_e)
+        assert context is not None, 'Exception not raised'
         assert "Legacy CSP keys are not supported" in str(context.exception)
 
 
@@ -93,8 +102,12 @@ class TestMSCAPI(unittest.TestCase):
 
         self.state.acquire_should_fail = True
         self.libs.get_last_error = lambda: 5
-        with self.assertRaises(Exception) as context:
+        context = None
+        try:
             mscapi.sign_payload_windows(cert_ctx_pointer=123, payload=b'data', libs=self.libs)
+        except Exception as _e:
+            context = types.SimpleNamespace(exception=_e)
+        assert context is not None, 'Exception not raised'
         assert "Failed to acquire private key" in str(context.exception)
         assert "5" in str(context.exception)
 
@@ -106,8 +119,12 @@ class TestMSCAPI(unittest.TestCase):
         certs = mscapi.get_windows_certificates()
         assert certs == []
 
-        with self.assertRaises(Exception) as ctx:
+        ctx = None
+        try:
             mscapi.sign_payload_windows(123, b'payload')
+        except Exception as _e:
+            ctx = types.SimpleNamespace(exception=_e)
+        assert ctx is not None, 'Exception not raised'
         assert "Windows native signing is not supported on this OS" in str(ctx.exception)
 
         mscapi.free_windows_certificate(123)

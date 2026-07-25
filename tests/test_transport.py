@@ -10,17 +10,17 @@ class TestRsaKeyGen(unittest.TestCase):
 
     def test_generated_key_is_mathematically_consistent(self):
         k = transport.generate_rsa_key(bits=1024)
-        self.assertEqual(k['n'], k['p'] * k['q'])
-        self.assertEqual(k['n'].bit_length(), 1024)
+        assert k['n'] == k['p'] * k['q']
+        assert k['n'].bit_length() == 1024
         # e·d ≡ 1 (mod λ) -> sign/verify round-trips any message
         m = 0x1234567890ABCDEF
-        self.assertEqual(pow(pow(m, k['d'], k['n']), k['e'], k['n']), m)
+        assert pow(pow(m, k['d'], k['n']), k['e'], k['n']) == m
 
     def test_crt_parameters_correct(self):
         k = transport.generate_rsa_key(bits=1024)
-        self.assertEqual(k['dp'], k['d'] % (k['p'] - 1))
-        self.assertEqual(k['dq'], k['d'] % (k['q'] - 1))
-        self.assertEqual((k['qinv'] * k['q']) % k['p'], 1)
+        assert k['dp'] == k['d'] % (k['p'] - 1)
+        assert k['dq'] == k['d'] % (k['q'] - 1)
+        assert (k['qinv'] * k['q']) % k['p'] == 1
 
 
 class TestSelfSignedCert(unittest.TestCase):
@@ -33,11 +33,11 @@ class TestSelfSignedCert(unittest.TestCase):
     def test_cert_parses_with_our_own_parser(self):
         der = pem_to_der(self.cert_pem)[0]
         meta = parse_certificate(der)
-        self.assertIn('CN=localhost', meta['subject'])
-        self.assertIn('CN=localhost', meta['issuer'])
-        self.assertEqual(meta['key_type'], 'RSA')
+        assert 'CN=localhost' in meta['subject']
+        assert 'CN=localhost' in meta['issuer']
+        assert meta['key_type'] == 'RSA'
         # SubjectAltName present (browsers require it)
-        self.assertIn('2.5.29.17', meta['extensions'])
+        assert '2.5.29.17' in meta['extensions']
 
     def test_self_signature_verifies(self):
         ''' The cert is signed by its own key: verify with our RSA verifier '''
@@ -56,7 +56,7 @@ class TestSelfSignedCert(unittest.TestCase):
         recovered = pow(int.from_bytes(signature, 'big'), e, n)
         em = recovered.to_bytes((n.bit_length() + 7) // 8, 'big')
         expected = transport.pad_pkcs1_v15_sha256(hashlib.sha256(tbs).digest(), n.bit_length())
-        self.assertEqual(em, expected)
+        assert em == expected
 
 
 class TestTlsHandshake(unittest.IsolatedAsyncioTestCase):
@@ -90,7 +90,7 @@ class TestTlsHandshake(unittest.IsolatedAsyncioTestCase):
                 data = await reader.read(100)
                 writer.close()
 
-            self.assertEqual(data, b'hello-tls')
+            assert data == b'hello-tls'
 
 
 class TestEnsureCert(unittest.TestCase):
@@ -100,14 +100,34 @@ class TestEnsureCert(unittest.TestCase):
             c1, k1 = transport.ensure_localhost_cert(d, bits=1024, announce=False)
             mtime = os.path.getmtime(c1)
             c2, k2 = transport.ensure_localhost_cert(d, bits=1024, announce=False)  # must not regenerate
-            self.assertEqual((c1, k1), (c2, k2))
-            self.assertEqual(os.path.getmtime(c2), mtime)
+            assert (c1, k1) == (c2, k2)
+            assert os.path.getmtime(c2) == mtime
+
+    def test_regenerates_cert_without_san(self):
+        """ A pre-upgrade CN-only cert (no subjectAltName) must be re-minted:
+            Chromium ignores CN and rejects SAN-less certs outright. """
+
+        with tempfile.TemporaryDirectory() as d:
+            c1, k1 = transport.ensure_localhost_cert(d, bits=1024, announce=False)
+            assert transport._cert_has_san(c1)
+
+            # forge the stale state: a cert whose DER carries no SAN OID
+            key = transport.generate_rsa_key(1024)
+            import base64
+            der = transport._seq(b'')  # any SAN-less DER stands in for an old cert
+            with open(c1, 'wb') as f:
+                f.write(transport._pem('CERTIFICATE', der))
+            assert not transport._cert_has_san(c1)
+
+            c2, k2 = transport.ensure_localhost_cert(d, bits=1024, announce=False)
+            assert (c1, k1) == (c2, k2)
+            assert transport._cert_has_san(c2)
 
     def test_key_file_is_private(self):
         with tempfile.TemporaryDirectory() as d:
             _, key_path = transport.ensure_localhost_cert(d, bits=1024, announce=False)
             if os.name != 'nt':
-                self.assertEqual(os.stat(key_path).st_mode & 0o777, 0o600)
+                assert os.stat(key_path).st_mode & 0o777 == 0o600
 
 
 class TestPickFreePort(unittest.TestCase):
@@ -129,23 +149,27 @@ class TestPickFreePort(unittest.TestCase):
             free = self._find_free_port()  # released, so pickable
             if free == taken:
                 self.skipTest('port collision, rerun')
-            self.assertEqual(transport.pick_free_port([taken, free]), free)
+            assert transport.pick_free_port([taken, free]) == free
 
     def test_raises_when_none_free(self):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
             occupied.bind(('127.0.0.1', 0))
             occupied.listen()
             taken = occupied.getsockname()[1]
-            with self.assertRaises(OSError):
+            _raised = False
+            try:
                 transport.pick_free_port([taken])
+            except OSError:
+                _raised = True
+            assert _raised, 'OSError not raised'
 
 
 class TestTrustInstructions(unittest.TestCase):
 
     def test_returns_platform_commands(self):
         cmds = transport.trust_instructions('/tmp/localhost.pem')
-        self.assertTrue(cmds and all(isinstance(c, list) for c in cmds))
-        self.assertTrue(any('/tmp/localhost.pem' in ' '.join(c) for c in cmds))
+        assert cmds and all(isinstance(c, list) for c in cmds)
+        assert any('/tmp/localhost.pem' in ' '.join(c) for c in cmds)
 
 
     @unittest.skipUnless(sys.platform.startswith('linux'), 'Linux distro routing')
@@ -166,9 +190,9 @@ class TestTrustInstructions(unittest.TestCase):
             finally:
                 os.path.isdir = orig_isdir
             flat = [' '.join(c) for c in cmds]
-            self.assertTrue(any(present_dir in f for f in flat), present_dir)
-            self.assertTrue(any(right_cmd in f for f in flat), f'{present_dir}: expected {right_cmd}')
-            self.assertFalse(any(wrong_cmd in f for f in flat), f'{present_dir}: wrong {wrong_cmd}')
+            assert any(present_dir in f for f in flat), present_dir
+            assert any(right_cmd in f for f in flat), f'{present_dir}: expected {right_cmd}'
+            assert not any(wrong_cmd in f for f in flat), f'{present_dir}: wrong {wrong_cmd}'
 
 
 class TestBrowserTrustStatus(unittest.TestCase):
@@ -221,8 +245,8 @@ class TestBrowserTrustStatus(unittest.TestCase):
             'sql:/fake/nssdb': self._Result(0, self.PEM.encode()),
             'sql:/fake/firefox': self._Result(0, self.PEM.encode()),
         })
-        self.assertEqual(transport.browser_trust_status(self.cert, run=run), 'trusted')
-        self.assertEqual(len(calls), 2)                   # every store was checked
+        assert transport.browser_trust_status(self.cert, run=run) == 'trusted'
+        assert len(calls) == 2
 
     @unittest.skipIf(sys.platform in ('darwin', 'win32'), 'NSS status is POSIX-only')
     def test_missing_in_one_store_is_untrusted(self):
@@ -230,7 +254,7 @@ class TestBrowserTrustStatus(unittest.TestCase):
             'sql:/fake/nssdb': self._Result(0, self.PEM.encode()),
             'sql:/fake/firefox': self._Result(255),       # nickname not found
         })
-        self.assertEqual(transport.browser_trust_status(self.cert, run=run), 'untrusted')
+        assert transport.browser_trust_status(self.cert, run=run) == 'untrusted'
 
     @unittest.skipIf(sys.platform in ('darwin', 'win32'), 'NSS status is POSIX-only')
     def test_stale_cert_in_store_is_untrusted(self):
@@ -241,23 +265,81 @@ class TestBrowserTrustStatus(unittest.TestCase):
             'sql:/fake/nssdb': self._Result(0, stale.encode()),
             'sql:/fake/firefox': self._Result(0, stale.encode()),
         })
-        self.assertEqual(transport.browser_trust_status(self.cert, run=run), 'untrusted')
+        assert transport.browser_trust_status(self.cert, run=run) == 'untrusted'
 
     @unittest.skipIf(sys.platform in ('darwin', 'win32'), 'NSS status is POSIX-only')
     def test_no_stores_is_unavailable(self):
         transport._nss_trust_dbs = lambda: []
-        self.assertEqual(transport.browser_trust_status(self.cert), 'unavailable')
+        assert transport.browser_trust_status(self.cert) == 'unavailable'
 
     @unittest.skipIf(sys.platform in ('darwin', 'win32'), 'NSS status is POSIX-only')
     def test_no_certutil_is_unavailable(self):
         self._shutil.which = lambda name: None
-        self.assertEqual(transport.browser_trust_status(self.cert), 'unavailable')
+        assert transport.browser_trust_status(self.cert) == 'unavailable'
 
     def test_pem_body_normalises_whitespace_and_ignores_trailers(self):
         wrapped = ('junk header\n-----BEGIN CERTIFICATE-----\n  AAAABBBBCCCC  \nDDDD\n'
                    '-----END CERTIFICATE-----\ntrailing noise\n')
-        self.assertEqual(transport._pem_body(wrapped), transport._pem_body(self.PEM))
-        self.assertEqual(transport._pem_body('no pem here'), '')
+        assert transport._pem_body(wrapped) == transport._pem_body(self.PEM)
+        assert transport._pem_body('no pem here') == ''
+
+
+class TestInstallBrowserTrust(unittest.TestCase):
+    '''
+    The self-signed localhost LEAF (basicConstraints CA:FALSE) must be trusted
+    as an SSL PEER (certutil 'P,,'), never a CA ('C,,'): Chromium rejects a
+    CA:FALSE cert trusted as a CA with ERR_CERT_INVALID. Real certutil roundtrip
+    into a throwaway NSS DB - the exact store the dashboard button writes.
+    '''
+
+    @unittest.skipIf(sys.platform in ('darwin', 'win32'), 'NSS/certutil path is POSIX-only')
+    def test_installs_as_ssl_peer_not_ca(self):
+        import shutil, subprocess
+        if not shutil.which('certutil'):
+            self.skipTest('certutil (nss tools) not installed')
+
+        tmp = tempfile.mkdtemp()
+        try:
+            cert, _ = transport.ensure_localhost_cert(tmp, bits=1024, announce=False)
+            nssdb = os.path.join(tmp, 'nssdb')
+            os.makedirs(nssdb)
+            subprocess.run(['certutil', '-N', '--empty-password', '-d', f'sql:{nssdb}'],
+                           check=True, capture_output=True)
+
+            orig = transport._nss_trust_dbs
+            transport._nss_trust_dbs = lambda: [f'sql:{nssdb}']
+            try:
+                ok, msg = transport.install_browser_trust(cert)
+            finally:
+                transport._nss_trust_dbs = orig
+            assert ok, msg
+
+            listing = subprocess.run(['certutil', '-L', '-d', f'sql:{nssdb}'],
+                                     capture_output=True, text=True).stdout
+            line = next((l for l in listing.splitlines()
+                         if transport._TRUST_NICK in l), '')
+            assert line, f'nickname not listed:\n{listing}'
+            assert 'P,,' in line, f'expected SSL peer trust, got: {line!r}'
+            assert 'C,,' not in line
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+
+class TestCertFingerprint(unittest.TestCase):
+    ''' The fingerprint identifies THIS cert - stable, and changes on regen,
+        which is what drives the dashboard's trust re-offer. '''
+
+    def test_stable_and_distinct(self):
+        with tempfile.TemporaryDirectory() as d1, tempfile.TemporaryDirectory() as d2:
+            a, _ = transport.ensure_localhost_cert(d1, bits=1024, announce=False)
+            b, _ = transport.ensure_localhost_cert(d2, bits=1024, announce=False)
+            fp_a = transport.cert_fingerprint(a)
+            assert len(fp_a) == 64                      # sha256 hex
+            assert transport.cert_fingerprint(a) == fp_a          # stable
+            assert transport.cert_fingerprint(b) != fp_a          # a different cert differs
+
+    def test_missing_cert_is_empty(self):
+        assert transport.cert_fingerprint('/no/such/cert.pem') == ''
 
 
 # Local copy of the DER length helper for the signature test above

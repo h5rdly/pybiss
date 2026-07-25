@@ -1,4 +1,5 @@
 import sys, unittest
+import types
 
 sys.path.append(f'{__file__.replace('\\', '/').rsplit('/', 2)[0]}')
 
@@ -30,8 +31,12 @@ class TestBTrustCards(unittest.TestCase):
 
     def test_factory_rejects_unknown(self):
         self.fake_conn.atr_bytes = bytes.fromhex('3B9999999999')
-        with self.assertRaises(Exception) as context:
+        context = None
+        try:
             BTrustDriver.create(self.fake_conn)
+        except Exception as _e:
+            context = types.SimpleNamespace(exception=_e)
+        assert context is not None, 'Exception not raised'
         assert 'Unsupported Smart Card ATR' in str(context.exception)
 
     def test_factory_creates_asepcos(self):
@@ -80,8 +85,12 @@ class TestBTrustCards(unittest.TestCase):
         self.fake_conn.transmit_responses = [b'\x63\xC2'] # 2 retries left
         driver = BaseCardDriver(self.fake_conn)
         
-        with self.assertRaises(Exception) as context:
+        context = None
+        try:
             driver.verify_pin('9999')
+        except Exception as _e:
+            context = types.SimpleNamespace(exception=_e)
+        assert context is not None, 'Exception not raised'
         assert '2 retries remaining' in str(context.exception)
 
 
@@ -89,8 +98,12 @@ class TestBTrustCards(unittest.TestCase):
         self.fake_conn.transmit_responses = [b'\x69\x83'] # Blocked APDU
         driver = BaseCardDriver(self.fake_conn)
         
-        with self.assertRaises(Exception) as context:
+        context = None
+        try:
             driver.verify_pin('1234')
+        except Exception as _e:
+            context = types.SimpleNamespace(exception=_e)
+        assert context is not None, 'Exception not raised'
         assert 'Smart card is blocked' in str(context.exception)
 
 
@@ -259,8 +272,12 @@ class TestBTrustCards(unittest.TestCase):
         self.fake_conn.transmit_responses = [b'\x69\x82'] # Security status not satisfied
         driver = BaseCardDriver(self.fake_conn)
         
-        with self.assertRaises(Exception) as context:
+        context = None
+        try:
             driver.change_pin('0000', '1111')
+        except Exception as _e:
+            context = types.SimpleNamespace(exception=_e)
+        assert context is not None, 'Exception not raised'
         assert 'PIN Change failed: 6982' in str(context.exception)
 
 

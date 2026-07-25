@@ -6,10 +6,12 @@
 *.key
 *.pem
 *.so
-
+tools/
 settings.ini
-biss_portal_traffic.jsonl
+biss_portal_traffic.*
 __pycache__/
+
+Roadmap.md
 
 ca_cache/
 

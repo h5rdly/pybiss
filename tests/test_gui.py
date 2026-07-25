@@ -6,7 +6,7 @@ Run on Linux CI with:  xvfb-run -a python -m unittest tests.test_gui
 Machines with no display skip the Tk-dependent classes automatically.
 '''
 
-import ast, atexit, locale, os, queue, sys, threading, time, unittest
+import ast, atexit, locale, logging, os, queue, sys, threading, time, types, unittest
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
@@ -36,7 +36,7 @@ except ImportError:
 _SHARED_ROOT = None
 if _TK_IMPORTABLE and not os.environ.get('PYBISS_SKIP_GUI_TESTS'):
     try:
-        _SHARED_ROOT = Window(title='pybiss-tests', width=400, height=300)
+        _SHARED_ROOT = Window(title='pybiss-tests')
         _SHARED_ROOT.withdraw()
 
         def _destroy_shared_root():
@@ -92,13 +92,13 @@ class TestUiBridge(unittest.TestCase):
 
         # Play the role of the dashboard's _monitor_ui_queue loop
         task_type, kwargs, res_q = ui_task_queue.get(timeout=2)
-        self.assertEqual(task_type, 'prompt_pin')
-        self.assertEqual(kwargs['label'], 'PIN')
+        assert task_type == 'prompt_pin'
+        assert kwargs['label'] == 'PIN'
         res_q.put('9999')
 
         t.join(timeout=2)
-        self.assertFalse(t.is_alive(), 'proxy never unblocked after the answer')
-        self.assertEqual(result['pin'], '9999')
+        assert not t.is_alive(), 'proxy never unblocked after the answer'
+        assert result['pin'] == '9999'
 
 
     def test_confirm_sign_carries_both_texts(self):
@@ -107,8 +107,8 @@ class TestUiBridge(unittest.TestCase):
             daemon=True,
         ).start()
         task_type, kwargs, res_q = ui_task_queue.get(timeout=2)
-        self.assertEqual(task_type, 'confirm_sign')
-        self.assertEqual(kwargs, {'text': 'msg', 'additional_text': 'extra'})
+        assert task_type == 'confirm_sign'
+        assert kwargs == {'text': 'msg', 'additional_text': 'extra'}
         res_q.put(True)  # unblock the worker so it doesn't linger
 
 
@@ -118,9 +118,9 @@ class TestUiBridge(unittest.TestCase):
         '''
 
         proxy = ThreadSafeUIProxy(timeout=0.05)
-        self.assertIsNone(proxy.prompt_pin())
-        self.assertEqual(proxy.choose_certificate([{'subject': 'A'}]), -1)
-        self.assertFalse(proxy.confirm_sign('sign this?'))
+        assert proxy.prompt_pin() is None
+        assert proxy.choose_certificate([{'subject': 'A'}]) == -1
+        assert not proxy.confirm_sign('sign this?')
 
     def test_late_answer_after_timeout_is_harmless(self):
         ''' The stale task stays queued - an answer put after the requester gave
@@ -128,7 +128,7 @@ class TestUiBridge(unittest.TestCase):
         '''
 
         proxy = ThreadSafeUIProxy(timeout=0.05)
-        self.assertIsNone(proxy.prompt_pin())
+        assert proxy.prompt_pin() is None
         task_type, kwargs, res_q = ui_task_queue.get_nowait()
         res_q.put('1234')               # the "user" answers too late: no error
 
@@ -143,9 +143,9 @@ class TestUiBridge(unittest.TestCase):
         saved = ui_bridge._GUI_IS_ACTIVE
         try:
             set_gui_active(True)
-            self.assertIsInstance(get_ui_provider(), ThreadSafeUIProxy)
+            assert isinstance(get_ui_provider(), ThreadSafeUIProxy)
             set_gui_active(False)
-            self.assertIsInstance(get_ui_provider(), CLIUserInterface)
+            assert isinstance(get_ui_provider(), CLIUserInterface)
         finally:
             set_gui_active(saved)
 
@@ -178,7 +178,7 @@ class TestMonitorUiQueueLive(unittest.TestCase):
             that there is exactly one queue object ever again. '''
 
         import src.dashboard
-        self.assertIs(src.dashboard.ui_task_queue, ui_task_queue)
+        assert src.dashboard.ui_task_queue is ui_task_queue
 
     def test_routes_pin_task_and_answers(self):
 
@@ -186,15 +186,115 @@ class TestMonitorUiQueueLive(unittest.TestCase):
         ui_task_queue.put(('prompt_pin', {'attempt': 1, 'label': 'PIN'}, res_q))
         dash = self._FakeDash()
         DesktopDashboard._monitor_ui_queue(dash)
-        self.assertEqual(res_q.get_nowait(), '1234')
-        self.assertTrue(dash.rescheduled, 'monitor loop must reschedule itself')
+        assert res_q.get_nowait() == '1234'
+        assert dash.rescheduled, 'monitor loop must reschedule itself'
 
 
     def test_empty_queue_is_not_an_error(self):
 
         dash = self._FakeDash()
         DesktopDashboard._monitor_ui_queue(dash)   # must not raise
-        self.assertTrue(dash.rescheduled)
+        assert dash.rescheduled
+
+
+class TestTrustOfferDecision(unittest.TestCase):
+    '''
+    _poll_trust_offer must re-offer when the cert is untrusted (a delete or a
+    regen), yet never nag about a cert the user already declined - keyed on the
+    cert fingerprint. Drives the unbound method with a stub self, no display.
+    '''
+
+    def setUp(self):
+        import src.dashboard as D
+        self.D = D
+        self.store = {}
+        self._orig_get, self._orig_set = D.config.get, D.config.set
+        self._orig_mb = D.MessageBox
+        D.config.get = lambda k, d='': self.store.get(k, d)
+        D.config.set = lambda k, v: self.store.__setitem__(k, v)
+        self.asked = []
+        outer = self
+
+        class FakeMB:
+            answer = True
+            @staticmethod
+            def askyesno(title, msg):
+                outer.asked.append(title)
+                return FakeMB.answer
+        self.FakeMB = FakeMB
+        D.MessageBox = FakeMB
+
+    def tearDown(self):
+        self.D.config.get, self.D.config.set = self._orig_get, self._orig_set
+        self.D.MessageBox = self._orig_mb
+
+    def _self(self, status, fp):
+        s = types.SimpleNamespace(_trust_status=status, _trust_cert_fp=fp)
+        s.after = lambda *a, **k: None
+        s.trusted = []
+        s._ui_trust_cert = lambda: s.trusted.append(True)
+        return s
+
+    def _poll(self, s):
+        self.D.DesktopDashboard._poll_trust_offer(s)
+
+    def test_untrusted_new_cert_offers(self):
+        s = self._self('untrusted', 'FP1')
+        self._poll(s)
+        assert self.asked and s.trusted == [True]
+
+    def test_declined_cert_is_not_nagged(self):
+        self.store['trustDeclinedFor'] = 'FP1'
+        s = self._self('untrusted', 'FP1')
+        self._poll(s)
+        assert not self.asked
+
+    def test_regenerated_cert_reoffers_despite_old_decline(self):
+        self.store['trustDeclinedFor'] = 'FP1'      # declined the OLD cert
+        s = self._self('untrusted', 'FP2')          # a new fingerprint
+        self._poll(s)
+        assert self.asked
+
+    def test_decline_is_remembered_per_cert(self):
+        self.FakeMB.answer = False
+        s = self._self('untrusted', 'FP9')
+        self._poll(s)
+        assert self.store.get('trustDeclinedFor') == 'FP9'
+
+    def test_trusted_never_offers(self):
+        s = self._self('trusted', 'FP1')
+        self._poll(s)
+        assert not self.asked
+
+
+@unittest.skipUnless(HAS_DISPLAY, 'needs a Tk display')
+class TestTrustIndicator(unittest.TestCase):
+    ''' _set_trust_indicator maps status -> label text + palette colour '''
+
+    def setUp(self):
+        import tkinter as tk
+        from src.tkinter_mods import Theme
+        Theme.apply('dark')
+        self.Theme = Theme
+        self.label = tk.Label(_SHARED_ROOT)
+        self.stub = types.SimpleNamespace(trust_status_label=self.label)
+
+    def tearDown(self):
+        self.label.destroy()
+
+    def test_trusted_is_green(self):
+        DesktopDashboard._set_trust_indicator(self.stub, 'trusted')
+        assert 'trusted' in self.label.cget('text')
+        assert self.label.cget('fg') == self.Theme.SUCCESS
+
+    def test_untrusted_is_danger(self):
+        DesktopDashboard._set_trust_indicator(self.stub, 'untrusted')
+        assert 'not trusted' in self.label.cget('text')
+        assert self.label.cget('fg') == self.Theme.DANGER
+
+    def test_unavailable_is_muted(self):
+        DesktopDashboard._set_trust_indicator(self.stub, 'unavailable')
+        assert self.label.cget('fg') == self.Theme.TEXT_MUTED
 
 
 class TestDashboardWiring(unittest.TestCase):
@@ -220,11 +320,11 @@ class TestDashboardWiring(unittest.TestCase):
 
     def test_no_dead_module_imports(self):
         mods = self._imported_modules()
-        self.assertNotIn('crypto_parsing', mods)
-        self.assertNotIn('server_ui', mods)
+        assert 'crypto_parsing' not in mods
+        assert 'server_ui' not in mods
 
     def test_pem_conversion_uses_cert_parser(self):
-        self.assertIn('cert_parser', self._imported_modules())
+        assert 'cert_parser' in self._imported_modules()
 
 
     def test_get_ui_provider_is_never_called(self):
@@ -233,7 +333,7 @@ class TestDashboardWiring(unittest.TestCase):
             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
             and n.func.id == 'get_ui_provider'
         ]
-        self.assertEqual(called, [], 'get_ui_provider() must not be called; use self.ui_renderer')
+        assert called == [], 'get_ui_provider() must not be called; use self.ui_renderer'
 
 
     def test_no_hardcoded_slot_id_one(self):
@@ -242,22 +342,22 @@ class TestDashboardWiring(unittest.TestCase):
             for kw in n.keywords
             if kw.arg == 'slot_id' and isinstance(kw.value, ast.Constant) and kw.value.value == 1
         ]
-        self.assertEqual(bad, [], 'slot_id=1 hard-coding regressed; use hardware.get_slots(...)')
+        assert bad == [], 'slot_id=1 hard-coding regressed; use hardware.get_slots(...)'
 
 
     def test_admin_path_reads_slots_dynamically(self):
-        self.assertIn('get_slots', self.source)
+        assert 'get_slots' in self.source
 
     def test_websites_view_is_built_and_navigable(self):
         # The view must be constructed AND reachable from the sidebar - building
         # one without the other leaves a dead tab or a KeyError on click.
-        self.assertIn('_build_websites_view', self.source)
-        self.assertIn("'websites'", self.source)
+        assert '_build_websites_view' in self.source
+        assert "'websites'" in self.source
 
     def test_verify_flow_runs_the_real_checker_tool(self):
         # The in-app dry run must reuse tools/check_registrar_flow.py, not fork
         # a second implementation of the portal's probe sequence.
-        self.assertIn('check_registrar_flow.py', self.source)
+        assert 'check_registrar_flow.py' in self.source
 
     def test_every_detector_call_exists(self):
         ''' scan_card called detector.get_readers(), which did not exist -
@@ -271,7 +371,7 @@ class TestDashboardWiring(unittest.TestCase):
             and isinstance(n.func.value, ast.Name) and n.func.value.id == 'detector'
         }
         missing = sorted(c for c in called if not hasattr(detector, c))
-        self.assertEqual(missing, [], f'dashboard calls detector.{missing} which do not exist')
+        assert missing == [], f'dashboard calls detector.{missing} which do not exist'
 
 
     def test_destroy_deactivates_gui_routing(self):
@@ -289,7 +389,7 @@ class TestDashboardWiring(unittest.TestCase):
                     and n.args and isinstance(n.args[0], ast.Constant)
                     and n.args[0].value is False
                 ]
-                self.assertTrue(calls, 'destroy() no longer flips the GUI flag')
+                assert calls, 'destroy() no longer flips the GUI flag'
                 return
         self.fail('DesktopDashboard.destroy() is gone - the dead-GUI deadlock is back')
 
@@ -300,20 +400,19 @@ class TestKnownPortals(unittest.TestCase):
 
     def test_entries_are_well_formed(self):
         from src.dashboard import KNOWN_PORTALS
-        self.assertTrue(KNOWN_PORTALS)
+        assert KNOWN_PORTALS
         for p in KNOWN_PORTALS:
-            self.assertTrue(p['name'])
-            self.assertTrue(p['url'].startswith('https://'), p['url'])
-            self.assertTrue(p['note'])
+            assert p['name']
+            assert p['url'].startswith('https://'), p['url']
+            assert p['note']
             if 'test_url' in p:
-                self.assertTrue(p['test_url'].startswith('https://'), p['test_url'])
+                assert p['test_url'].startswith('https://'), p['test_url']
 
     def test_registrar_is_listed_with_its_test_page(self):
         from src.dashboard import KNOWN_PORTALS
         registrar = [p for p in KNOWN_PORTALS if 'registryagency.bg' in p['url']]
-        self.assertEqual(len(registrar), 1)
-        self.assertEqual(registrar[0]['test_url'],
-                         'https://portal.registryagency.bg/test-signature')
+        assert len(registrar) == 1
+        assert registrar[0]['test_url'] == 'https://portal.registryagency.bg/test-signature'
 
 
 # Layer 2: composite widgets - display required, mainloop NOT required
@@ -368,7 +467,7 @@ class TestWidgets(TkTestCase):
 
     def test_button_renders_its_label(self):
         btn = self._button('Go', lambda: None, width=100, height=30)
-        self.assertEqual(btn.itemcget(btn.text_id, 'text'), 'Go')
+        assert btn.itemcget(btn.text_id, 'text') == 'Go'
 
     def test_button_release_inside_fires_command(self):
         fired = []
@@ -376,47 +475,47 @@ class TestWidgets(TkTestCase):
 
         class E: x, y = 10, 10          # release inside the button bounds
         btn._on_release(E)
-        self.assertEqual(fired, [1])
+        assert fired == [1]
 
         class Outside: x, y = 500, 500  # drag-off-and-release must NOT fire
         btn._on_release(Outside)
-        self.assertEqual(fired, [1])
+        assert fired == [1]
 
     def test_button_hover_changes_canvas_fill(self):
         ''' Assert on canvas item state, not pixels '''
 
         btn = self._button('Hover', lambda: None)
         btn._on_enter(None)
-        self.assertEqual(btn.itemcget(btn.rect_id, 'fill'), Theme.HOVER)
+        assert btn.itemcget(btn.rect_id, 'fill') == Theme.HOVER
         btn._on_leave(None)
-        self.assertEqual(btn.itemcget(btn.rect_id, 'fill'), Theme.PRIMARY)
+        assert btn.itemcget(btn.rect_id, 'fill') == Theme.PRIMARY
 
     def test_toggle_flips_state_and_notifies(self):
         seen = []
         t = Toggle(self.root, text='opt', command=seen.append, is_on=False)
         t.pack(); self.pump()
         t.toggle()
-        self.assertTrue(t.get())
-        self.assertEqual(seen, [True])
+        assert t.get()
+        assert seen == [True]
 
     def test_entry_masks_but_returns_plaintext(self):
         e = Entry(self.root, show='*')
         e.pack(); self.pump()
         e.entry.insert(0, '1234')
-        self.assertEqual(e.get(), '1234')
-        self.assertEqual(e.entry.cget('show'), '*')   # still masked on screen
+        assert e.get() == '1234'
+        assert e.entry.cget('show') == '*'
 
     def test_entry_placeholder_is_not_masked_and_reads_empty(self):
         # The PIN-field subtlety: the hint must not render as asterisks, 
         # an untouched field must read as empty rather than as the hint text.
         e = Entry(self.root, show='*', placeholder='Enter PIN')
         e.pack(); self.pump()
-        self.assertEqual(e.entry.cget('show'), '')    # unmasked while hinting
-        self.assertEqual(e.get(), '')                 # hint is not user input
+        assert e.entry.cget('show') == ''
+        assert e.get() == ''
         e._clear_placeholder()
         e.entry.insert(0, '4321')
-        self.assertEqual(e.entry.cget('show'), '*')   # mask restored on input
-        self.assertEqual(e.get(), '4321')
+        assert e.entry.cget('show') == '*'
+        assert e.get() == '4321'
 
     def test_button_survives_bare_toplevel_host(self):
         ''' Unscaled buttons beat invisible ones '''
@@ -428,8 +527,8 @@ class TestWidgets(TkTestCase):
             btn.pack()
             self.wait_for(lambda: btn.winfo_width() > 1)
             btn._draw()                 # must not die on missing ui_scale
-            self.assertIsNotNone(btn.text_id, 'Button never drew on a bare host')
-            self.assertEqual(btn.itemcget(btn.text_id, 'text'), 'Go')
+            assert btn.text_id is not None, 'Button never drew on a bare host'
+            assert btn.itemcget(btn.text_id, 'text') == 'Go'
         finally:
             host.destroy()
 
@@ -438,12 +537,26 @@ class TestWidgets(TkTestCase):
             into logging 
         '''
 
-        with self.assertLogs(level='ERROR') as captured:
+        records = []
+        handler = logging.Handler()
+        handler.emit = records.append              # capture each record verbatim
+        root = logging.getLogger()
+        old_level = root.level
+        root.addHandler(handler)
+        root.setLevel(logging.ERROR)
+        try:
             try:
                 raise ValueError('boom in a callback')
             except ValueError:
                 self.root.report_callback_exception(*sys.exc_info())
-        self.assertIn('boom in a callback', '\n'.join(captured.output))
+        finally:
+            root.removeHandler(handler)
+            root.setLevel(old_level)
+
+        # format() folds in the traceback (exc_info), where the message lands
+        fmt = logging.Formatter('%(levelname)s:%(name)s:%(message)s')
+        output = '\n'.join(fmt.format(r) for r in records if r.levelno >= logging.ERROR)
+        assert 'boom in a callback' in output
 
 
     def test_zoom_respects_bounds(self):
@@ -451,10 +564,10 @@ class TestWidgets(TkTestCase):
         try:
             for _ in range(30):
                 self.root._zoom_in()
-            self.assertLessEqual(self.root.zoom_level, 24)
+            assert self.root.zoom_level <= 24
             for _ in range(40):
                 self.root._zoom_out()
-            self.assertGreaterEqual(self.root.zoom_level, 8)
+            assert self.root.zoom_level >= 8
         finally:
             self.root.zoom_level = saved
 
@@ -466,15 +579,15 @@ class TestWidgetDelegation(TkTestCase):
 
         tb = Textbox(self.root)
         tb.configure(bg='#123456')
-        self.assertEqual(str(tb.cget('bg')), '#123456')
+        assert str(tb.cget('bg')) == '#123456'
         tb.insert('end', 'hello')
-        self.assertIn('hello', tb.text.get('1.0', 'end'))
+        assert 'hello' in tb.text.get('1.0', 'end')
 
 
     def test_listbox_configure_and_cget_round_trip(self):
         lb = Listbox(self.root)
         lb.configure(selectforeground='#abcdef')
-        self.assertEqual(str(lb.cget('selectforeground')), '#abcdef')
+        assert str(lb.cget('selectforeground')) == '#abcdef'
 
 
     def test_listbox_insert_and_delete(self):
@@ -482,9 +595,9 @@ class TestWidgetDelegation(TkTestCase):
         lb = Listbox(self.root)
         lb.insert('end', 'a')
         lb.insert('end', 'b')
-        self.assertEqual(lb.listbox.size(), 2)
+        assert lb.listbox.size() == 2
         lb.delete(0, 'end')
-        self.assertEqual(lb.listbox.size(), 0)
+        assert lb.listbox.size() == 0
 
 
 class TestToplevelGrabLifecycle(TkTestCase):
@@ -514,9 +627,8 @@ class TestToplevelGrabLifecycle(TkTestCase):
             self.fail(f'grab regression: Toplevel unconstructable while '
                       f'withdrawn ({e}) - grab_set belongs in show()')
         self.pump()
-        self.assertEqual(tl.winfo_viewable(), 0, 'flashed before show()')
-        self.assertIsNone(self.root.grab_current(),
-                          'modal grab taken while withdrawn - X11 crashes here')
+        assert tl.winfo_viewable() == 0, 'flashed before show()'
+        assert self.root.grab_current() is None, 'modal grab taken while withdrawn - X11 crashes here'
 
     def test_show_takes_grab_and_reveals(self):
         tl = Toplevel(self.root, title='pin', width=200, height=120)
@@ -524,12 +636,10 @@ class TestToplevelGrabLifecycle(TkTestCase):
         # The master root is withdrawn here, so show() drops the transient
         # hint (a transient of an unmapped master may never map at all) and
         # the grab may arrive via the bounded 25ms retry - hence wait_for.
-        self.assertTrue(self.wait_for(lambda: tl.winfo_viewable() == 1),
-                        'dialog never mapped after show()')
+        assert self.wait_for(lambda: tl.winfo_viewable() == 1), 'dialog never mapped after show()'
         # str() comparison sidesteps the dual-module class-identity trap
-        self.assertTrue(self.wait_for(
-            lambda: str(self.root.grab_current()) == str(tl)),
-            'show() must own the modal grab')
+        assert self.wait_for(
+            lambda: str(self.root.grab_current()) == str(tl)), 'show() must own the modal grab'
 
     def test_destroy_releases_grab(self):
         ''' A cancelled PIN dialog must not leave the whole app ungrabbable '''
@@ -539,7 +649,7 @@ class TestToplevelGrabLifecycle(TkTestCase):
         self.wait_for(lambda: self.root.grab_current() is not None)
         tl.destroy()
         self.pump()
-        self.assertIsNone(self.root.grab_current())
+        assert self.root.grab_current() is None
 
     def test_show_survives_destroy_mid_reveal(self):
         ''' A scripted user (or our modal test driver) can destroy the dialog
@@ -550,7 +660,7 @@ class TestToplevelGrabLifecycle(TkTestCase):
         self.root.after(1, tl.destroy)
         tl.show()                       # must not raise
         self.wait_for(lambda: not tl.winfo_exists())
-        self.assertIsNone(self.root.grab_current())
+        assert self.root.grab_current() is None
 
     def test_two_dialogs_in_sequence(self):
         ''' The retry-PIN flow: dialog one closes, dialog two must be able to
@@ -563,9 +673,8 @@ class TestToplevelGrabLifecycle(TkTestCase):
 
         second = Toplevel(self.root, title='attempt 2', width=200, height=120)
         second.show()
-        self.assertTrue(self.wait_for(
-            lambda: str(self.root.grab_current()) == str(second)),
-            'second dialog never re-acquired the grab')
+        assert self.wait_for(
+            lambda: str(self.root.grab_current()) == str(second)), 'second dialog never re-acquired the grab'
 
 
 class TestMessageBoxGrabLifecycle(TkTestCase):
@@ -604,12 +713,10 @@ class TestMessageBoxGrabLifecycle(TkTestCase):
         from src.tkinter_mods import MessageBox
         closed = []
         self._close_when_present(closed)
-        self.assertFalse(MessageBox.askyesno('Confirm', 'Proceed?'),
-                         'closing the dialog must mean No, not Yes')
-        self.assertTrue(closed, 'driver never found the MessageBox toplevel')
+        assert not MessageBox.askyesno('Confirm', 'Proceed?'), 'closing the dialog must mean No, not Yes'
+        assert closed, 'driver never found the MessageBox toplevel'
         self.pump()
-        self.assertIsNone(self.root.grab_current(),
-                          'MessageBox leaked its modal grab')
+        assert self.root.grab_current() is None, 'MessageBox leaked its modal grab'
 
     def test_messagebox_inherits_root_ui_scale(self):
         ''' Regression: raw tk.Toplevel had no ui_scale, so Button._draw died
@@ -638,9 +745,8 @@ class TestMessageBoxGrabLifecycle(TkTestCase):
         self._after_ids.append(self.root.after(150, run))
 
         MessageBox.showinfo('Info', 'scaled?')
-        self.assertEqual(seen.get('ui_scale'), self.root.ui_scale)
-        self.assertTrue(seen.get('drawn') and all(seen['drawn']),
-                        'MessageBox buttons failed to draw (ui_scale missing?)')
+        assert seen.get('ui_scale') == self.root.ui_scale
+        assert seen.get('drawn') and all(seen['drawn']), 'MessageBox buttons failed to draw (ui_scale missing?)'
 
 
 # -- Layer 3: blocking modal dialogs, driven by scheduled interaction
@@ -706,25 +812,25 @@ class TestModalRenderer(TkTestCase):
             dlg.event_generate('<Return>')
 
         self._drive(type_and_submit)
-        self.assertEqual(self._renderer().prompt_pin(), '4321')
+        assert self._renderer().prompt_pin() == '4321'
 
     def test_prompt_pin_escape_cancels(self):
         self._drive(lambda dlg: dlg.event_generate('<Escape>'))
-        self.assertIsNone(self._renderer().prompt_pin())
+        assert self._renderer().prompt_pin() is None
 
     def test_confirm_sign_reject(self):
         self._drive(lambda dlg: dlg.event_generate('<Escape>'))
-        self.assertFalse(self._renderer().confirm_sign('sign this?'))
+        assert not self._renderer().confirm_sign('sign this?')
 
     def test_choose_certificate_defaults_to_first(self):
         self._drive(lambda dlg: dlg.event_generate('<Return>'))
         certs = [{'subject': 'Alice', 'serial': '1'}, {'subject': 'Bob', 'serial': '2'}]
-        self.assertEqual(self._renderer().choose_certificate(certs), 0)
+        assert self._renderer().choose_certificate(certs) == 0
 
     def test_choose_certificate_escape_returns_sentinel(self):
         self._drive(lambda dlg: dlg.event_generate('<Escape>'))
         certs = [{'subject': 'Alice', 'serial': '1'}]
-        self.assertEqual(self._renderer().choose_certificate(certs), -1)
+        assert self._renderer().choose_certificate(certs) == -1
 
 
 # ===========================================================================

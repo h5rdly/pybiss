@@ -27,54 +27,82 @@ class TestJwsVerify(unittest.TestCase):
         ''' A correctly signed JWS from a renew-authorized cert decodes to its payload '''
 
         token = make_jws(PAYLOAD, _cert())
-        self.assertEqual(jws.verify(token), PAYLOAD)
+        assert jws.verify(token) == PAYLOAD
 
     def test_renew_cert_rejected_when_admin_required(self):
         ''' Renew-level authorization must not unlock admin-only operations '''
 
         token = make_jws(PAYLOAD, _cert())
-        with self.assertRaises(jws.JwsError):
+        _raised = False
+        try:
             jws.verify(token, admin_required=True)
+        except jws.JwsError:
+            _raised = True
+        assert _raised, 'jws.JwsError not raised'
 
     def test_admin_cert_passes_admin_required(self):
         token = make_jws(PAYLOAD, _cert(ext_texts=ADMIN_EXT))
-        self.assertEqual(jws.verify(token, admin_required=True), PAYLOAD)
+        assert jws.verify(token, admin_required=True) == PAYLOAD
 
     def test_cert_without_authorization_rejected(self):
         token = make_jws(PAYLOAD, _cert(ext_texts={}))
-        with self.assertRaises(jws.JwsError):
+        _raised = False
+        try:
             jws.verify(token)
+        except jws.JwsError:
+            _raised = True
+        assert _raised, 'jws.JwsError not raised'
 
     def test_alg_none_rejected(self):
         ''' The classic alg:none forgery must be rejected before any other check '''
 
         token = make_jws(PAYLOAD, _cert(), alg='none')
-        with self.assertRaises(jws.JwsError):
+        _raised = False
+        try:
             jws.verify(token)
+        except jws.JwsError:
+            _raised = True
+        assert _raised, 'jws.JwsError not raised'
 
     def test_hmac_alg_rejected(self):
         ''' HS* is rejected outright (HMAC key-confusion attack) '''
 
         token = make_jws(PAYLOAD, _cert(), alg='HS256')
-        with self.assertRaises(jws.JwsError):
+        _raised = False
+        try:
             jws.verify(token)
+        except jws.JwsError:
+            _raised = True
+        assert _raised, 'jws.JwsError not raised'
 
     def test_tampered_payload_rejected(self):
         token = make_jws(PAYLOAD, _cert(), tamper=True)
-        with self.assertRaises(jws.JwsError):
+        _raised = False
+        try:
             jws.verify(token)
+        except jws.JwsError:
+            _raised = True
+        assert _raised, 'jws.JwsError not raised'
 
     def test_unknown_issuer_rejected(self):
         ''' A cert not issued by a pinned B-Trust CA fails even with a valid signature '''
 
         token = make_jws(PAYLOAD, _cert(aki='AA' * 20))
-        with self.assertRaises(jws.JwsError):
+        _raised = False
+        try:
             jws.verify(token)
+        except jws.JwsError:
+            _raised = True
+        assert _raised, 'jws.JwsError not raised'
 
     def test_expired_certificate_rejected(self):
         token = make_jws(PAYLOAD, _cert(not_before='200101000000Z', not_after='210101000000Z'))
-        with self.assertRaises(jws.JwsError):
+        _raised = False
+        try:
             jws.verify(token)
+        except jws.JwsError:
+            _raised = True
+        assert _raised, 'jws.JwsError not raised'
 
     def test_missing_x5c_rejected(self):
         token = make_jws(PAYLOAD, _cert())
@@ -84,13 +112,21 @@ class TestJwsVerify(unittest.TestCase):
         del head['x5c']
         from tests.x509_helpers import b64url
         broken = b64url(json.dumps(head).encode()) + '.' + '.'.join(token.split('.')[1:])
-        with self.assertRaises(jws.JwsError):
+        _raised = False
+        try:
             jws.verify(broken)
+        except jws.JwsError:
+            _raised = True
+        assert _raised, 'jws.JwsError not raised'
 
     def test_garbage_input_rejected(self):
         for garbage in ('', 'not-a-jws', 'a.b', 'a.b.c.d', '..'):
-            with self.assertRaises(jws.JwsError):
+            _raised = False
+            try:
                 jws.verify(garbage)
+            except jws.JwsError:
+                _raised = True
+            assert _raised, 'jws.JwsError not raised'
 
 
 class TestBuildCertificateChain(unittest.TestCase):
@@ -102,16 +138,16 @@ class TestBuildCertificateChain(unittest.TestCase):
     def test_chain_ordered_leaf_to_root(self):
         candidates = [self.stranger, self.root, self.inter]  # deliberately shuffled
         chain = build_certificate_chain(self.leaf, candidates)
-        self.assertEqual(chain, [self.leaf, self.inter, self.root])
+        assert chain == [self.leaf, self.inter, self.root]
 
     def test_missing_intermediate_ends_chain_early(self):
         chain = build_certificate_chain(self.leaf, [self.root, self.stranger])
-        self.assertEqual(chain, [self.leaf])
+        assert chain == [self.leaf]
 
     def test_self_signed_leaf_stands_alone(self):
         lone = build_cert(cn='Lone', ski='05' * 20, aki='05' * 20)
         chain = build_certificate_chain(lone, [self.root, self.inter])
-        self.assertEqual(chain, [lone])
+        assert chain == [lone]
 
 
 class TestChainExists(unittest.TestCase):
@@ -122,25 +158,25 @@ class TestChainExists(unittest.TestCase):
 
     def test_complete_chain_found(self):
         ok = chain_exists_for_key_identifier('01' * 20, [self.leaf, self.inter, self.root])
-        self.assertTrue(ok)
+        assert ok
 
     def test_case_insensitive_key_identifier(self):
         # Alphabetic hex so the case actually differs between query and cert
         lone = build_cert(cn='Lower', ski='ab' * 20)
-        self.assertTrue(chain_exists_for_key_identifier('AB' * 20, [lone]))
-        self.assertTrue(chain_exists_for_key_identifier('ab' * 20, [lone]))
+        assert chain_exists_for_key_identifier('AB' * 20, [lone])
+        assert chain_exists_for_key_identifier('ab' * 20, [lone])
 
     def test_incomplete_chain_not_found(self):
         # Missing the root -> chain ends at a non-self-signed intermediate
         ok = chain_exists_for_key_identifier('01' * 20, [self.leaf, self.inter])
-        self.assertFalse(ok)
+        assert not ok
 
     def test_unknown_key_identifier_not_found(self):
         ok = chain_exists_for_key_identifier('AB' * 20, [self.leaf, self.inter, self.root])
-        self.assertFalse(ok)
+        assert not ok
 
     def test_empty_key_identifier_not_found(self):
-        self.assertFalse(chain_exists_for_key_identifier('', [self.leaf]))
+        assert not chain_exists_for_key_identifier('', [self.leaf])
 
 
 if __name__ == '__main__':

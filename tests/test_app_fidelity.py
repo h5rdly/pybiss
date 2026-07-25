@@ -4,6 +4,7 @@ Fidelity tests: pybiss's REST surface must match the official BISS daemon
 '''
 
 import json, sys, unittest
+import re
 from unittest.mock import patch
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
@@ -39,14 +40,14 @@ class TestRouteTable(unittest.TestCase):
             '/setPIN', '/setPUK', '/sign', '/unblockPIN', '/v2/renew', '/writeCertSC',
         ]
         for path in expected_posts:
-            self.assertIn(('POST', path), app.routes, f'missing POST {path}')
+            assert ('POST', path) in app.routes, f'missing POST {path}'
         for path in ('/version', '/status'):
-            self.assertIn(('GET', path), app.routes, f'missing GET {path}')
+            assert ('GET', path) in app.routes, f'missing GET {path}'
 
     def test_get_serial_number_is_not_a_get_route(self):
         ''' The Java daemon only accepts POST here; a GET route would mask that '''
 
-        self.assertNotIn(('GET', '/getSerialNumber'), app.routes)
+        assert ('GET', '/getSerialNumber') not in app.routes
 
 
 class TestEnvelopes(unittest.TestCase):
@@ -54,37 +55,37 @@ class TestEnvelopes(unittest.TestCase):
     def test_status_returns_empty_json_string(self):
         ''' GET /status answers with the literal JSON string "" like the original '''
 
-        self.assertEqual(get('/status'), '')
-        self.assertEqual(json.dumps(get('/status')), '""')
+        assert get('/status') == ''
+        assert json.dumps(get('/status')) == '""'
 
     def test_version_shape_and_format(self):
         res = get('/version')
         for field in ('version', 'httpMethods', 'contentTypes', 'signatureTypes',
                       'selectorAvailable', 'hashAlgorithms'):
-            self.assertIn(field, res)
+            assert field in res
         # Portals may version-gate; the value must mimic the Java "3.46" format
-        self.assertRegex(res['version'], r'^\d+\.\d+$')
+        assert re.search(r'^\d+\.\d+$', res['version'])
 
     def test_advertised_hash_algorithms_are_all_implemented(self):
         ''' Never advertise a hash we cannot actually sign with (SHA1 was dropped) '''
 
         from src.app import _APDU_HASH
         advertised = {a.strip() for a in get('/version')['hashAlgorithms'].split(',')}
-        self.assertEqual(advertised, set(_APDU_HASH))
-        self.assertNotIn('SHA1', advertised)
+        assert advertised == set(_APDU_HASH)
+        assert 'SHA1' not in advertised
 
     def test_close_returns_bare_string_body(self):
         ''' /close answers with an unquoted string body despite the JSON content type '''
 
         res = post('/close')
-        self.assertEqual(res, b'Signing service successfully closed!')
+        assert res == b'Signing service successfully closed!'
 
     def test_unimplemented_endpoints_return_biss_error_envelope(self):
         for path in ('/generatePfx', '/getPfxKeyPair', '/setNewPUKNewPIN', '/v2/renew'):
             res = post(path)
-            self.assertEqual(res['status'], 'error', path)
-            self.assertEqual(res['reasonCode'], 501, path)
-            self.assertIn('reasonText', res, path)
+            assert res['status'] == 'error', path
+            assert res['reasonCode'] == 501, path
+            assert 'reasonText' in res, path
 
 
 # Every card-touching endpoint the official daemon gates behind jwsData.
@@ -100,15 +101,15 @@ class TestJwsGating(unittest.TestCase):
     def test_missing_jws_data_rejected(self):
         for path in JWS_GATED_PATHS:
             res = post(path, {})
-            self.assertEqual(res['status'], 'error', path)
-            self.assertEqual(res['reasonCode'], 403, path)
+            assert res['status'] == 'error', path
+            assert res['reasonCode'] == 403, path
 
     def test_forged_jws_rejected(self):
         cert = build_cert(aki='AA' * 20, ext_texts={jws.OID_RENEW_FUNCTIONS: jws.RENEW_MARKER})
         forged = make_jws({'vendorName': 'X', 'serNum': '1'}, cert)
         for path in JWS_GATED_PATHS:
             res = post(path, {'jwsData': forged})
-            self.assertEqual(res['reasonCode'], 403, path)
+            assert res['reasonCode'] == 403, path
 
     def test_plain_json_write_endpoints_are_not_ungated(self):
         ''' Regression guard: a write/delete op with no jwsData must never reach the card '''
@@ -116,8 +117,8 @@ class TestJwsGating(unittest.TestCase):
         for path in ('/writeCertSC', '/genRSAPair', '/delRSAPair', '/delCert', '/renew'):
             with patch('src.app.hardware') as hw_spy, patch('src.app.detector') as det_spy:
                 res = post(path, {'label': 'X', 'certificate': 'AAAA'})
-                self.assertEqual(res['reasonCode'], 403, path)
-                self.assertEqual(hw_spy.mock_calls, [], path)
+                assert res['reasonCode'] == 403, path
+                assert hw_spy.mock_calls == [], path
                 det_spy.auto_detect_library.assert_not_called()
 
     def test_unblock_requires_admin_authorization(self):
@@ -127,9 +128,9 @@ class TestJwsGating(unittest.TestCase):
                           ext_texts={jws.OID_RENEW_FUNCTIONS: jws.RENEW_MARKER})
         renew_token = make_jws({'vendorName': 'X', 'serNum': '1'}, cert)
         res = post('/unblockPIN', {'jwsData': renew_token})
-        self.assertEqual(res['status'], 'error')
-        self.assertEqual(res['reasonCode'], 403)
-        self.assertIn('authorization', res['reasonText'].lower())
+        assert res['status'] == 'error'
+        assert res['reasonCode'] == 403
+        assert 'authorization' in res['reasonText'].lower()
 
 
 class TestChainFoundEndpoint(unittest.TestCase):
@@ -146,13 +147,13 @@ class TestChainFoundEndpoint(unittest.TestCase):
 
     def test_missing_key_identifier_rejected(self):
         res = post('/chainFound', {})
-        self.assertFalse(res['chainFound'])
-        self.assertEqual(res['reasonCode'], 400)
+        assert not res['chainFound']
+        assert res['reasonCode'] == 400
 
     def test_complete_chain_reported_found(self):
         res = post('/chainFound', {'keyIdentifier': '01' * 20, 'store': 'MY'})
-        self.assertTrue(res['chainFound'])
-        self.assertEqual(res['status'], 'ok')
+        assert res['chainFound']
+        assert res['status'] == 'ok'
 
     def test_incomplete_chain_reported_not_found(self):
         self.loader.stop()
@@ -160,21 +161,21 @@ class TestChainFoundEndpoint(unittest.TestCase):
                             return_value=[self.leaf, self.inter])  # root missing
         self.loader.start()
         res = post('/chainFound', {'keyIdentifier': '01' * 20, 'store': 'MY'})
-        self.assertFalse(res['chainFound'])
-        self.assertEqual(res['status'], 'ok')
+        assert not res['chainFound']
+        assert res['status'] == 'ok'
 
     def test_unknown_identifier_reported_not_found(self):
         res = post('/chainFound', {'keyIdentifier': 'AB' * 20, 'store': 'MY'})
-        self.assertFalse(res['chainFound'])
-        self.assertEqual(res['status'], 'ok')
+        assert not res['chainFound']
+        assert res['status'] == 'ok'
 
     def test_never_touches_card_or_hardware(self):
         ''' The original daemon's chainFound is store-only; ours must be too '''
 
         with patch('src.app.hardware') as hw_spy, patch('src.app.detector') as det_spy:
             post('/chainFound', {'keyIdentifier': '01' * 20, 'store': 'MY'})
-        self.assertEqual(hw_spy.mock_calls, [])
-        self.assertEqual(det_spy.mock_calls, [])
+        assert hw_spy.mock_calls == []
+        assert det_spy.mock_calls == []
 
 
 class TestGenSpkacEndpoint(unittest.TestCase):
@@ -205,32 +206,32 @@ class TestGenSpkacEndpoint(unittest.TestCase):
 
     def test_valid_request_returns_pkcs10(self):
         res = post('/genSPKAC', {'jwsData': self._valid_jws()})
-        self.assertEqual(res['status'], 'ok')
+        assert res['status'] == 'ok'
         # the real generate_spkac ran against the fake token and produced a
         # non-trivial base64 SPKAC payload
         import base64
-        self.assertGreater(len(base64.b64decode(res['pkcs10Data'])), 32)
+        assert len(base64.b64decode(res['pkcs10Data'])) > 32
 
     def test_requested_key_size_reaches_the_card(self):
         ''' A 3072-bit request (current B-Trust cards) must not silently become 2048 '''
 
         res = post('/genSPKAC', {'jwsData': self._valid_jws(key_size=3072)})
-        self.assertEqual(res['status'], 'ok')
+        assert res['status'] == 'ok'
         # the fake token recorded the CKA_MODULUS_BITS the keygen actually requested
-        self.assertEqual(self.token.last_keygen_bits, 3072)
+        assert self.token.last_keygen_bits == 3072
 
     def test_invalid_key_size_returns_biss_envelope(self):
         ''' A junk keySize must produce a 400 T-envelope, not a raw 500 '''
 
         res = post('/genSPKAC', {'jwsData': self._valid_jws(key_size='4096-bit')})
-        self.assertEqual(res['status'], 'error')
-        self.assertEqual(res['reasonCode'], 400)
-        self.assertIn('reasonText', res)
+        assert res['status'] == 'error'
+        assert res['reasonCode'] == 400
+        assert 'reasonText' in res
 
     def test_missing_jws_rejected_without_touching_card(self):
         with patch('src.app.hardware.generate_spkac') as spy:
             res = post('/genSPKAC', {})
-            self.assertEqual(res['reasonCode'], 403)
+            assert res['reasonCode'] == 403
             spy.assert_not_called()
 
 
@@ -251,23 +252,21 @@ class TestLocaleCatalog(unittest.TestCase):
 
     def test_known_key_returns_biss_english_text(self):
         self._set_lang('en')
-        self.assertEqual(biss_locale.reason('response.success'),
-                         'The process is successfully completed')
-        self.assertEqual(biss_locale.reason('error.no-card-found'), 'No card found')
+        assert biss_locale.reason('response.success') == 'The process is successfully completed'
+        assert biss_locale.reason('error.no-card-found') == 'No card found'
 
     def test_unknown_key_falls_back_to_key(self):
         self._set_lang('en')
-        self.assertEqual(biss_locale.reason('no.such.key'), 'no.such.key')
+        assert biss_locale.reason('no.such.key') == 'no.such.key'
 
     def test_bulgarian_translation_when_configured(self):
         self._set_lang('bg')
-        self.assertEqual(biss_locale.reason('response.success'), 'Операцията завърши успешно')
+        assert biss_locale.reason('response.success') == 'Операцията завърши успешно'
 
     def test_bulgarian_falls_back_to_english_for_ui_only_key(self):
         # error.signature-type-not-supported exists only in the English catalog
         self._set_lang('bg')
-        self.assertEqual(biss_locale.reason('error.signature-type-not-supported'),
-                         'The signature type is not supported')
+        assert biss_locale.reason('error.signature-type-not-supported') == 'The signature type is not supported'
 
 
 class TestPinSafetyGate(unittest.TestCase):
@@ -293,8 +292,8 @@ class TestPinSafetyGate(unittest.TestCase):
              patch('src.app.detector') as det_spy:
             for path in self.PIN_PATHS:
                 res = post(path, body)
-                self.assertEqual(res['reasonCode'], 403, path)
-        self.assertEqual(hw_spy.mock_calls, [])
+                assert res['reasonCode'] == 403, path
+        assert hw_spy.mock_calls == []
         det_spy.auto_detect_library.assert_not_called()
 
     def test_missing_jws_never_touches_hardware_or_ui(self):

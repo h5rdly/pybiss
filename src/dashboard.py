@@ -1,5 +1,5 @@
 import os, sys, logging, subprocess, tkinter as tk, base64, threading, queue
-from tkinter import filedialog
+from tkinter import filedialog, font as tkfont
 
 from . import detector, hardware, transport
 from .app import CERTS_DIR
@@ -8,8 +8,8 @@ from .i18n import _
 from .app import app as api_server
 
 from .tkinter_mods import (
-    Theme, Window, Button, Frame, Scrollbar, MessageBox, Toggle, Label, 
-    set_dark_titlebar, Toplevel, Textbox, Listbox, Entry
+    Theme, Window, Button, Frame, Scrollbar, MessageBox, Toggle, Label,
+    set_dark_titlebar, Toplevel, Textbox, Listbox, Entry, Font
 )
 from .ui_bridge import ui_task_queue, set_gui_active
 
@@ -36,8 +36,13 @@ class DesktopDashboard(Window):
 
     def __init__(self):
 
-        super().__init__(title="PyBISS Desktop Manager", width=750, height=550)
-        
+        # Set the palette before the root window is built so it paints themed
+        # from the first frame (Window.__init__ reads Theme.BG / titlebar).
+        Theme.apply(config.get('theme', 'dark'))
+
+        super().__init__(title="PyBISS Desktop Manager")
+        Font.apply(Font.resolve(config.get('font', 'Segoe UI')))
+
         # Logging
         self._log_file = config.config_dir / 'pybiss.log'
         self._log_file.touch(exist_ok=True) # Ensure the file exists so we don't crash
@@ -77,20 +82,25 @@ class DesktopDashboard(Window):
         self._monitor_ui_queue()
         # First run: offer (never silently apply) the browser-trust install
         self._offer_browser_trust_async()
+        # First run: quietly fetch a nicer default font (harmless if offline)
+        self._fetch_font_async()
 
 
     def _offer_browser_trust_async(self):
-        ''' First launch only '''
+        '''
+        Offer to trust the localhost cert whenever the browser does not - so a
+        deleted or REGENERATED cert re-offers (keyed on the cert's fingerprint),
+        while a cert the user explicitly declined is never nagged about again.
+        '''
 
-        if config.get_bool('trustPromptShown', fallback=False):
-            return
         self._trust_status = None
+        self._trust_cert_fp = ''
 
         def work():
             from . import transport
-            certs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'certs')
             try:
-                cert_path, _key = transport.ensure_localhost_cert(certs_dir, announce=False)
+                cert_path, _key = transport.ensure_localhost_cert(CERTS_DIR, announce=False)
+                self._trust_cert_fp = transport.cert_fingerprint(cert_path)
                 self._trust_status = transport.browser_trust_status(cert_path)
             except Exception:
                 self._trust_status = 'unavailable'
@@ -107,7 +117,11 @@ class DesktopDashboard(Window):
             return
         if status != 'untrusted':
             return           # already trusted, or no store to write - nothing to offer
-        config.set('trustPromptShown', 'yes')   # one offer ever, even if declined
+
+        fp = getattr(self, '_trust_cert_fp', '')
+        if fp and fp == config.get('trustDeclinedFor', ''):
+            return           # this exact cert was declined - don't nag; the button stays
+
         if MessageBox.askyesno(
                 "Trust PyBISS in your browser?",
                 "Signing portals (like the company registrar) reach PyBISS over "
@@ -115,6 +129,8 @@ class DesktopDashboard(Window):
                 "Trust it now? This writes only your own browser's certificate "
                 "store - no sudo, reversible, one click."):
             self._ui_trust_cert()
+        else:
+            config.set('trustDeclinedFor', fp)   # remember the decline, per cert
 
 
     def destroy(self):
@@ -150,44 +166,57 @@ class DesktopDashboard(Window):
     # --- Layout Architecture ---
 
     def _build_sidebar(self):
-        
-        self.sidebar = tk.Frame(self, bg='#1E1E1E', width=200)
+
+        nav_font = tkfont.Font(family=Font.FAMILY, size=11, weight='bold')
+
+        # Navigation Buttons
+        nav_items = [
+            ('home', f'🏠 {_("dash_title").split()[0]}'), # Grabs just the first word for compactness
+            ('logs', f'📄 {_("tray_log_file")}'),
+            ('admin', '🛠️ Admin'),
+            ('diagnostics', '🔬 Diagnostics'),
+            ('websites', '🌐 Websites'),
+            ('settings', '⚙️ Settings') # Hardcoded for now, or add to i18n.py
+        ]
+        exit_label = '🚪 ' + _('tray_exit')
+
+        # The UI font may resolve to a wider face than the Windows design assumed
+        # (or the user may pick their own via settings.ini), so a fixed 200px
+        # sidebar clips labels. Size the sidebar to the widest label actually
+        # rendered (with a small pad, clamped to a sane ceiling) so it fits on any
+        # platform/font - tight on Windows, wider elsewhere.
+        pad_x = 14
+        widest = max([nav_font.measure(t) for _id, t in nav_items] +
+                     [nav_font.measure(exit_label)])
+        sidebar_w = min(max(200, widest + 2 * pad_x + 8), 300)
+
+        self.sidebar = tk.Frame(self, bg=Theme.SIDEBAR, width=sidebar_w)
         self.sidebar.pack(side='left', fill='y')
         self.sidebar.pack_propagate(False)
 
         # App Brand/Logo Area
-        brand = tk.Label(self.sidebar, text='PyBISS', font=('Segoe UI', 22, 'bold'), 
-                         bg='#1E1E1E', fg=Theme.PRIMARY)
+        brand = tk.Label(self.sidebar, text='PyBISS', font=(Font.FAMILY, 22, 'bold'),
+                         bg=Theme.SIDEBAR, fg=Theme.PRIMARY)
         brand.pack(pady=(25, 35))
 
-        # Navigation Buttons
         self.nav_btns = {}
-        nav_items = [
-            ('home', f'🏠  {_("dash_title").split()[0]}'), # Grabs just the first word for compactness
-            ('logs', f'📄  {_("tray_log_file")}'), 
-            ('admin', '🛠️  Administration'),
-            ('diagnostics', '🔬  Diagnostics'),
-            ('websites', '🌐  Websites'),
-            ('settings', '⚙️  Settings') # Hardcoded for now, or add to i18n.py
-        ]
-        
         for view_id, text in nav_items:
-            btn = tk.Button(self.sidebar, text=text, bg='#1E1E1E', fg=Theme.TEXT, 
-                            activebackground=Theme.SURFACE, activeforeground='white',
-                            relief='flat', borderwidth=0, font=('Segoe UI', 11, 'bold'), 
-                            anchor='w', padx=20, pady=12,
+            btn = tk.Button(self.sidebar, text=text, bg=Theme.SIDEBAR, fg=Theme.TEXT,
+                            activebackground=Theme.SURFACE, activeforeground=Theme.TEXT,
+                            relief='flat', borderwidth=0, font=nav_font,
+                            anchor='w', padx=pad_x, pady=12,
                             command=lambda vid=view_id: self.show_view(vid))
             btn.pack(fill='x', pady=2)
-            
+
             # Hover effect
             btn.bind('<Enter>', lambda e, b=btn: b.configure(bg=Theme.SURFACE) if b['bg'] != Theme.PRIMARY else None)
-            btn.bind('<Leave>', lambda e, b=btn: b.configure(bg='#1E1E1E') if b['bg'] != Theme.PRIMARY else None)
+            btn.bind('<Leave>', lambda e, b=btn: b.configure(bg=Theme.SIDEBAR) if b['bg'] != Theme.PRIMARY else None)
             self.nav_btns[view_id] = btn
 
         # Exit at bottom
-        exit_btn = tk.Button(self.sidebar, text='🚪  ' + _('tray_exit'), bg='#1E1E1E', fg=Theme.DANGER, 
-                             relief='flat', borderwidth=0, font=('Segoe UI', 11, 'bold'), 
-                             anchor='w', padx=20, pady=12, command=self.destroy)
+        exit_btn = tk.Button(self.sidebar, text=exit_label, bg=Theme.SIDEBAR, fg=Theme.DANGER,
+                             relief='flat', borderwidth=0, font=nav_font,
+                             anchor='w', padx=pad_x, pady=12, command=self.destroy)
         exit_btn.pack(side='bottom', fill='x', pady=15)
 
     def _build_main_container(self):
@@ -200,7 +229,7 @@ class DesktopDashboard(Window):
             view.place_forget()
             
         for btn in self.nav_btns.values():
-            btn.configure(bg='#1E1E1E')
+            btn.configure(bg=Theme.SIDEBAR)
 
         self.views[view_id].place(relx=0, rely=0, relwidth=1, relheight=1)
         self.nav_btns[view_id].configure(bg=Theme.PRIMARY)
@@ -212,12 +241,12 @@ class DesktopDashboard(Window):
         frame = tk.Frame(self.main_container, bg=Theme.BG)
         self.views['home'] = frame
 
-        tk.Label(frame, text=_('dash_title'), font=('Segoe UI', 24, 'bold'), 
+        tk.Label(frame, text=_('dash_title'), font=(Font.FAMILY, 24, 'bold'), 
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(35, 5))
 
         self.status_var = tk.StringVar(value=_('status_ready'))
-        tk.Label(frame, textvariable=self.status_var, font=('Segoe UI', 12),
-                 bg=Theme.BG, fg='#2CC985').pack(anchor='w', padx=35, pady=(0, 25))
+        tk.Label(frame, textvariable=self.status_var, font=(Font.FAMILY, 12),
+                 bg=Theme.BG, fg=Theme.SUCCESS).pack(anchor='w', padx=35, pady=(0, 25))
 
         btn_frame = tk.Frame(frame, bg=Theme.BG)
         btn_frame.pack(anchor='w', padx=35)
@@ -236,13 +265,13 @@ class DesktopDashboard(Window):
 
         header = tk.Frame(frame, bg=Theme.BG)
         header.pack(fill='x', padx=35, pady=(35, 10))
-        tk.Label(header, text='System Logs', font=('Segoe UI', 24, 'bold'), bg=Theme.BG, fg=Theme.TEXT).pack(side='left')
+        tk.Label(header, text='System Logs', font=(Font.FAMILY, 24, 'bold'), bg=Theme.BG, fg=Theme.TEXT).pack(side='left')
         
         # Manual refresh button, just in case
         Button(header, 'Refresh', self.refresh_logs, width=90, fg_color=Theme.SURFACE).pack(side='right')
 
         # Refactored using the new Composite Textbox
-        self.log_text = Textbox(frame, width=500, height=380, bg='#1E1E1E', fg='#A9B7C6', font=('Consolas', 9))
+        self.log_text = Textbox(frame, width=500, height=380, bg=Theme.SIDEBAR, fg=Theme.CONSOLE_TEXT, font=('Consolas', 9))
         self.log_text.pack(pady=10, padx=35, fill='both', expand=True)
         self.log_text.configure(state='disabled')
         
@@ -255,7 +284,7 @@ class DesktopDashboard(Window):
         frame = tk.Frame(self.main_container, bg=Theme.BG)
         self.views['admin'] = frame
 
-        tk.Label(frame, text='Card Administration', font=('Segoe UI', 24, 'bold'), 
+        tk.Label(frame, text='Card Administration', font=(Font.FAMILY, 24, 'bold'), 
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(35, 20))
 
         # PIN Management Section
@@ -266,7 +295,7 @@ class DesktopDashboard(Window):
         Button(pin_frame, 'Unblock with PUK', self._ui_unblock_pin, width=160, fg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER).pack(side='left')
 
         # Certificate Management Section
-        tk.Label(frame, text='Certificate Storage', font=('Segoe UI', 18, 'bold'), 
+        tk.Label(frame, text='Certificate Storage', font=(Font.FAMILY, 18, 'bold'), 
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(30, 10))
                  
         cert_frame = tk.Frame(frame, bg=Theme.BG)
@@ -280,10 +309,10 @@ class DesktopDashboard(Window):
         frame = tk.Frame(self.main_container, bg=Theme.BG)
         self.views['diagnostics'] = frame
 
-        tk.Label(frame, text='Card Diagnostics', font=('Segoe UI', 24, 'bold'),
+        tk.Label(frame, text='Card Diagnostics', font=(Font.FAMILY, 24, 'bold'),
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(35, 5))
         tk.Label(frame, text='Read-only. Never touches the PIN retry counter.',
-                 font=('Segoe UI', 11), bg=Theme.BG, fg='#2CC985').pack(anchor='w', padx=35, pady=(0, 20))
+                 font=(Font.FAMILY, 11), bg=Theme.BG, fg=Theme.SUCCESS).pack(anchor='w', padx=35, pady=(0, 20))
 
         btns = tk.Frame(frame, bg=Theme.BG)
         btns.pack(anchor='w', padx=35)
@@ -527,9 +556,8 @@ class DesktopDashboard(Window):
         ''' One-click: trust the localhost cert in the browser (no terminal, no sudo) '''
 
         from . import transport
-        certs_dir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'certs')
         try:
-            cert_path, _key = transport.ensure_localhost_cert(certs_dir, announce=False)
+            cert_path, _key = transport.ensure_localhost_cert(CERTS_DIR, announce=False)
         except Exception as e:
             MessageBox.showinfo("Trust certificate failed", f"Could not prepare the certificate: {e}")
             return
@@ -537,7 +565,38 @@ class DesktopDashboard(Window):
             ok, msg = transport.install_browser_trust(cert_path)
         except Exception as e:
             ok, msg = False, str(e)
+        if ok:
+            config.set('trustDeclinedFor', '')   # a fresh trust clears any past decline
         MessageBox.showinfo("Trust certificate" if ok else "Trust certificate failed", msg)
+        self._refresh_trust_indicator()
+
+
+    def _refresh_trust_indicator(self):
+        ''' Recompute the browser-trust status off-thread and update the label '''
+
+        if not hasattr(self, 'trust_status_label'):
+            return
+
+        def work():
+            from . import transport
+            try:
+                cert_path, _ = transport.ensure_localhost_cert(CERTS_DIR, announce=False)
+                status = transport.browser_trust_status(cert_path)
+            except Exception:
+                status = 'unavailable'
+            self.after(0, lambda: self._set_trust_indicator(status))
+
+        threading.Thread(target=work, daemon=True).start()
+
+
+    def _set_trust_indicator(self, status: str):
+        text, color = {
+            'trusted':   ('Browser trust:  ✓ trusted', Theme.SUCCESS),
+            'untrusted': ('Browser trust:  ✗ not trusted (click above)', Theme.DANGER),
+        }.get(status, ('Browser trust:  — unavailable (no browser cert store)',
+                       Theme.TEXT_MUTED))
+        if hasattr(self, 'trust_status_label') and self.trust_status_label.winfo_exists():
+            self.trust_status_label.configure(text=text, fg=color)
 
 
     def _build_websites_view(self):
@@ -546,18 +605,18 @@ class DesktopDashboard(Window):
         frame = tk.Frame(self.main_container, bg=Theme.BG)
         self.views['websites'] = frame
 
-        tk.Label(frame, text='Known Websites', font=('Segoe UI', 24, 'bold'),
+        tk.Label(frame, text='Known Websites', font=(Font.FAMILY, 24, 'bold'),
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(35, 5))
         tk.Label(frame, text='Portals known to work with the B-Trust local signing '
-                 'protocol PyBISS implements.', font=('Segoe UI', 11),
+                 'protocol PyBISS implements.', font=(Font.FAMILY, 11),
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor='w', padx=35, pady=(0, 20))
 
         for portal in KNOWN_PORTALS:
             row = tk.Frame(frame, bg=Theme.SURFACE)
             row.pack(fill='x', padx=35, pady=(0, 12))
-            tk.Label(row, text=portal['name'], font=('Segoe UI', 12, 'bold'),
+            tk.Label(row, text=portal['name'], font=(Font.FAMILY, 12, 'bold'),
                      bg=Theme.SURFACE, fg=Theme.TEXT).pack(anchor='w', padx=15, pady=(10, 0))
-            tk.Label(row, text=portal['note'], font=('Segoe UI', 10),
+            tk.Label(row, text=portal['note'], font=(Font.FAMILY, 10),
                      bg=Theme.SURFACE, fg=Theme.TEXT, wraplength=600,
                      justify='left').pack(anchor='w', padx=15, pady=(2, 6))
             btns = tk.Frame(row, bg=Theme.SURFACE)
@@ -572,7 +631,7 @@ class DesktopDashboard(Window):
 
         tk.Label(frame, text='Verify replays the registrar\'s own detection and '
                  'certificate steps against the running PyBISS - read-only, no PIN. '
-                 'Pick your certificate when the dialog pops.', font=('Segoe UI', 10),
+                 'Pick your certificate when the dialog pops.', font=(Font.FAMILY, 10),
                  bg=Theme.BG, fg=Theme.TEXT, wraplength=650,
                  justify='left').pack(anchor='w', padx=35, pady=(10, 5))
         self.flow_text = Textbox(frame, width=500, height=170, font=('Consolas', 10))
@@ -625,7 +684,7 @@ class DesktopDashboard(Window):
         frame = tk.Frame(self.main_container, bg=Theme.BG)
         self.views["settings"] = frame
 
-        tk.Label(frame, text=_("tray_language"), font=("Segoe UI", 20, "bold"), 
+        tk.Label(frame, text=_("tray_language"), font=(Font.FAMILY, 20, "bold"), 
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor="w", padx=35, pady=(35, 20))
 
         # Language Segmented Control 
@@ -638,8 +697,37 @@ class DesktopDashboard(Window):
         self.btn_bg = Button(lang_frame, "Български (BG)", lambda: self.set_lang("bg"), width=130)
         self.btn_bg.pack(side="left")
 
-        # Provider Segmented Control 
-        tk.Label(frame, text=_("tray_sign_api"), font=("Segoe UI", 20, "bold"), 
+        # Font family
+        tk.Label(frame, text="Font", font=(Font.FAMILY, 20, "bold"),
+                 bg=Theme.BG, fg=Theme.TEXT).pack(anchor="w", padx=35, pady=(40, 8))
+        tk.Label(frame, text="UI font family, applied live. An unavailable name falls back "
+                 "to the system default (PyBISS fetches the Hack font once on first run).",
+                 font=(Font.FAMILY, 11),
+                 bg=Theme.BG, fg=Theme.TEXT, wraplength=650, justify="left").pack(anchor="w", padx=35, pady=(0, 8))
+        font_frame = tk.Frame(frame, bg=Theme.BG)
+        font_frame.pack(anchor="w", padx=35)
+        self.font_entry = Entry(font_frame, width=220)
+        self.font_entry.entry.insert(0, config.get("font", "Segoe UI"))
+        self.font_entry.pack(side="left", padx=(0, 10))
+        Button(font_frame, "Apply Font", self.set_font, width=120).pack(side="left")
+
+        # Theme Segmented Control (applied live, no restart)
+        tk.Label(frame, text="Appearance", font=(Font.FAMILY, 20, "bold"),
+                 bg=Theme.BG, fg=Theme.TEXT).pack(anchor="w", padx=35, pady=(40, 20))
+        theme_frame = tk.Frame(frame, bg=Theme.BG)
+        theme_frame.pack(anchor="w", padx=35)
+        self.btn_theme_dark = Button(theme_frame, "Dark",
+                                     lambda: self.set_theme("dark"), width=110)
+        self.btn_theme_dark.pack(side="left", padx=(0, 5))
+        self.btn_theme_light = Button(theme_frame, "Light",
+                                      lambda: self.set_theme("light"), width=110)
+        self.btn_theme_light.pack(side="left", padx=(0, 5))
+        self.btn_theme_system = Button(theme_frame, "System",
+                                       lambda: self.set_theme("system"), width=110)
+        self.btn_theme_system.pack(side="left")
+
+        # Provider Segmented Control
+        tk.Label(frame, text=_("tray_sign_api"), font=(Font.FAMILY, 20, "bold"), 
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor="w", padx=35, pady=(40, 20))
 
         api_frame = tk.Frame(frame, bg=Theme.BG)
@@ -652,7 +740,7 @@ class DesktopDashboard(Window):
         self.btn_p12.pack(side="left")
 
         # System Settings
-        tk.Label(frame, text="System", font=("Segoe UI", 20, "bold"), 
+        tk.Label(frame, text="System", font=(Font.FAMILY, 20, "bold"), 
                  bg=Theme.BG, fg=Theme.TEXT).pack(anchor="w", padx=35, pady=(40, 20))
                  
         is_boot_on = config.get_bool("osStarted", fallback=True)
@@ -661,15 +749,20 @@ class DesktopDashboard(Window):
         self.toggle_boot.pack(anchor="w", padx=35, pady=(0, 20))
 
         tk.Label(frame, text="Signing portals reach PyBISS over local HTTPS. Trust "
-                 "the certificate so your browser accepts it.", font=("Segoe UI", 11),
-                 bg=Theme.BG, fg=Theme.TEXT_MUTED if hasattr(Theme, 'TEXT_MUTED') else Theme.TEXT,
+                 "the certificate so your browser accepts it.", font=(Font.FAMILY, 11),
+                 bg=Theme.BG, fg=Theme.TEXT_MUTED,
                  wraplength=650, justify="left").pack(anchor="w", padx=35, pady=(0, 8))
         Button(frame, "Trust Certificate for Browser", self._ui_trust_cert,
-               width=240, fg_color=Theme.SURFACE).pack(anchor="w", padx=35, pady=(0, 20))
+               width=240, fg_color=Theme.SURFACE).pack(anchor="w", padx=35, pady=(0, 6))
+        self.trust_status_label = tk.Label(frame, text="Browser trust:  checking...",
+                 font=(Font.FAMILY, 11), bg=Theme.BG, fg=Theme.TEXT_MUTED)
+        self.trust_status_label.pack(anchor="w", padx=35, pady=(0, 20))
 
         # Initialize visuals based on config
         self.set_lang(config.get("language", "en"), save=False)
         self.set_api(config.get("signAPI", "PKCS11"), save=False)
+        self.set_theme(config.get("theme", "dark"), save=False)
+        self._refresh_trust_indicator()
 
         # Factory Reset
         Button(frame, _("tray_default"), self.factory_reset, fg_color=Theme.DANGER, 
@@ -687,6 +780,75 @@ class DesktopDashboard(Window):
         self.btn_bg.fg_color = Theme.PRIMARY if lang == "bg" else Theme.SURFACE
         self.btn_en._draw()
         self.btn_bg._draw()
+
+
+    def set_theme(self, mode, save=True):
+        ''' Switch dark/light/system live - repaints the whole tree, no restart '''
+
+        if save:
+            config.set("theme", mode)
+        mapping = Theme.apply(mode)             # {old_hex: new_hex} of what changed
+        if mapping:
+            Theme.apply_live(self, mapping)     # remap every built widget in place
+            self.configure(bg=Theme.BG)
+            set_dark_titlebar(self)             # match the native titlebar too
+
+        # Highlight the chosen segment (the user's choice, not the resolved value)
+        for m, btn in (("dark", self.btn_theme_dark),
+                       ("light", self.btn_theme_light),
+                       ("system", self.btn_theme_system)):
+            btn.fg_color = Theme.PRIMARY if m == mode else Theme.SURFACE
+            btn._draw()
+
+
+    def set_font(self):
+        family = self.font_entry.get().strip() or "Segoe UI"
+        config.set("font", family)
+        Font.apply(Font.resolve(family))
+        self.apply_font_family_live()          # no restart - live across the whole UI
+
+
+    def _fetch_font_async(self):
+        '''
+        First run only: quietly fetch a nicer default font (Hack) in the
+        background. Harmless if it fails - the resolved OS fallback is already in
+        use, so offline just means we retry next launch. We never override a font
+        the user chose themselves.
+        '''
+
+        if config.get_bool('fontFetched', fallback=False):
+            return
+        if config.get('font', 'Segoe UI') not in ('', 'Segoe UI'):
+            return                              # user picked their own - leave it
+        self._font_fetch = None
+
+        def work():
+            try:
+                from . import fonts
+                fonts.download_hack()
+                self._font_fetch = 'ok'
+            except Exception:
+                self._font_fetch = 'fail'       # offline etc - retry next launch
+
+        threading.Thread(target=work, daemon=True).start()
+        self.after(1000, self._poll_font_fetch)
+
+    def _poll_font_fetch(self, tries: int = 0):
+        status = getattr(self, '_font_fetch', None)
+        if status is None:
+            if tries < 90:                      # up to ~90s
+                self.after(1000, lambda: self._poll_font_fetch(tries + 1))
+            return
+        if status != 'ok':
+            return                              # failed - don't set the flag, retry later
+
+        from . import fonts
+        config.set('font', fonts.HACK_FAMILY)
+        config.set('fontFetched', 'yes')        # got it - never fetch again
+        if fonts.hack_available():              # Windows: usable this session
+            Font.apply(fonts.HACK_FAMILY)
+            self.apply_font_family_live()
+        # else Linux/mac: installed, picked up on the next launch (fallback until then)
 
 
     def set_api(self, api, save=True):
@@ -910,10 +1072,10 @@ class ModalRenderer:
         dialog = Toplevel(self.master, title='Authorize Signature', width=500, height=420)
         result = {'confirmed': False}
         
-        Label(dialog, text='Do you authorize this signature?', font=('Segoe UI', 14, 'bold')).pack(pady=(20, 10))
+        Label(dialog, text='Do you authorize this signature?', font=(Font.FAMILY, 14, 'bold')).pack(pady=(20, 10))
         
         # Instantiating the new composite Textbox handles the scrolling and formatting seamlessly
-        textbox = Textbox(dialog, width=460, height=240, font=('Segoe UI', 11), wrap='word')
+        textbox = Textbox(dialog, width=460, height=240, font=(Font.FAMILY, 11), wrap='word')
         textbox.pack(pady=10, padx=20, fill='both', expand=True)
         
         full_text = f'Message:\n{text}'
@@ -933,7 +1095,7 @@ class ModalRenderer:
         btn_frame.pack(pady=15)
         
         # Grab focus to the "Authorize" button by default
-        btn_yes = Button(btn_frame, 'Authorize', on_yes, fg_color='#2FA572', hover_color='#106A43', width=130)
+        btn_yes = Button(btn_frame, 'Authorize', on_yes, fg_color=Theme.SUCCESS, hover_color=Theme.SUCCESS_HOVER, width=130)
         btn_yes.pack(side='left', padx=10)
         Button(btn_frame, 'Reject', on_no, fg_color=Theme.DANGER, hover_color=Theme.DANGER_HOVER, width=130).pack(side='right', padx=10)
         

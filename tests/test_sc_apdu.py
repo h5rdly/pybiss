@@ -26,8 +26,12 @@ class TestSCAPDU(unittest.TestCase):
     def test_pad_pkcs1_bad_hash_length(self):
         ''' 32-byte limit for SHA256 '''
 
-        with self.assertRaises(ValueError):
+        _raised = False
+        try:
             pad_pkcs1_v15_sha256(b'\xAA' * 31)
+        except ValueError:
+            _raised = True
+        assert _raised, 'ValueError not raised'
 
 
     def test_read_binary_file_success(self):

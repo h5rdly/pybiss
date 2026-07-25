@@ -1,4 +1,5 @@
 import ctypes, hashlib, struct, sys, unittest
+import types
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -28,7 +29,7 @@ class TestFreeBsdIoctlEncoding(unittest.TestCase):
     def test_usb_gen_descriptor_is_32_bytes(self):
         # void* (8) + 4x uint16 (8) + 6x uint8 + uint8[8], padded to 8-alignment.
         # This size goes INTO USB_GET_FULL_DESC's ioctl number.
-        self.assertEqual(ctypes.sizeof(ccid._UsbGenDescriptor), 32)
+        assert ctypes.sizeof(ccid._UsbGenDescriptor) == 32
 
     def test_ioctl_numbers_match_the_freebsd_headers(self):
         expected = {
@@ -39,16 +40,15 @@ class TestFreeBsdIoctlEncoding(unittest.TestCase):
             '_USB_SET_TX_TIMEOUT':    _ioc(_IOC_IN,    'U', 137, 4),
         }
         for name, want in expected.items():
-            self.assertEqual(getattr(ccid, name), want, f'{name} mis-encoded')
+            assert getattr(ccid, name) == want, f'{name} mis-encoded'
 
     def test_freebsd_encoding_is_not_linuxs(self):
         # Linux: 14-bit size at bit 16, direction at bit 30. FreeBSD: 13-bit size,
         # direction in the top 3 bits. Same request would collide if we reused one.
-        self.assertNotEqual(ccid._USB_SET_RX_TIMEOUT,
-                            ccid._IOC(1, 'U', 114, 4))
+        assert ccid._USB_SET_RX_TIMEOUT != ccid._IOC(1, 'U', 114, 4)
 
     def test_linux_bulk_ioctl_unchanged_by_the_refactor(self):
-        self.assertEqual(ccid._USBDEVFS_BULK, 0xC0185502)   # known-good on 64-bit
+        assert ccid._USBDEVFS_BULK == 0xC0185502
 
 
 class TestBackendSelection(unittest.TestCase):
@@ -59,17 +59,25 @@ class TestBackendSelection(unittest.TestCase):
                 'ccid': {'dwFeatures': features, 'dwMaxCCIDMessageLength': 273}}
 
     def test_known_backends_are_registered(self):
-        self.assertEqual(sorted(ccid._TRANSPORTS), ['ugen', 'usbfs'])
+        assert sorted(ccid._TRANSPORTS) == ['ugen', 'usbfs']
 
     def test_unknown_backend_is_rejected(self):
-        with self.assertRaises(ccid.CcidError):
+        _raised = False
+        try:
             ccid.CcidUsb(self._info('nonesuch'))
+        except ccid.CcidError:
+            _raised = True
+        assert _raised, 'ccid.CcidError not raised'
 
     def test_tpdu_reader_is_rejected_before_any_io(self):
         # exchange level 0x01 = TPDU: the reader would need a T=1 state machine.
-        with self.assertRaises(ccid.CcidError) as caught:
+        caught = None
+        try:
             ccid.CcidUsb(self._info('usbfs', features=0x00010000))
-        self.assertIn('tpdu', str(caught.exception).lower())
+        except ccid.CcidError as _e:
+            caught = types.SimpleNamespace(exception=_e)
+        assert caught is not None, 'ccid.CcidError not raised'
+        assert 'tpdu' in str(caught.exception).lower()
 
 
 class _FakeTransport:
@@ -118,18 +126,18 @@ class TestSharedProtocolLayerOverAFakeTransport(unittest.TestCase):
 
     def test_power_on_returns_the_atr(self):
         usb = ccid.CcidUsb(self.info)
-        self.assertEqual(usb.power_on(), _FakeTransport.card.get_atr())
+        assert usb.power_on() == _FakeTransport.card.get_atr()
 
     def test_slot_status_reports_a_card(self):
         usb = ccid.CcidUsb(self.info)
-        self.assertEqual(usb.slot_status() & 0x03, 0)      # 0 = present and active
+        assert usb.slot_status() & 0x03 == 0
 
     def test_sequence_number_increments_per_message(self):
         usb = ccid.CcidUsb(self.info)
         usb.power_on()
         first = usb.seq
         usb.slot_status()
-        self.assertEqual(usb.seq, (first + 1) & 0xFF)
+        assert usb.seq == (first + 1) & 0xFF
 
     def test_full_discover_and_sign_through_the_ccid_layer(self):
         usb = ccid.CcidUsb(self.info)
@@ -144,18 +152,18 @@ class TestSharedProtocolLayerOverAFakeTransport(unittest.TestCase):
 
         drv = BTrustDriver.create(Conn())
         certs = drv.discover_certificates()
-        self.assertEqual(len(certs), 1)
+        assert len(certs) == 1
 
         n, e = get_rsa_public_key(certs[0]['der'])
         sig = drv.sign('1234', hashlib.sha256(b'transport').digest(),
                        key_ref=certs[0]['key_ref'])
-        self.assertTrue(verify_rsa_pkcs1_v1_5(b'transport', sig, n, e, 'SHA256'))
+        assert verify_rsa_pkcs1_v1_5(b'transport', sig, n, e, 'SHA256')
 
 
 class TestDiscoveryDispatch(unittest.TestCase):
 
     def test_find_readers_never_raises_and_returns_a_list(self):
-        self.assertIsInstance(ccid.find_ccid_readers(), list)
+        assert isinstance(ccid.find_ccid_readers(), list)
 
     def test_ugen_discovery_matches_what_is_actually_attached(self):
         '''
@@ -166,14 +174,14 @@ class TestDiscoveryDispatch(unittest.TestCase):
         '''
 
         found = ccid._find_ugen()
-        self.assertIsInstance(found, list)
+        assert isinstance(found, list)
 
         if not list(Path('/dev').glob('ugen[0-9]*.[0-9]*')):
-            self.assertEqual(found, [], 'no ugen nodes exist, so nothing may be reported')
+            assert found == [], 'no ugen nodes exist, so nothing may be reported'
         for reader in found:
-            self.assertEqual(reader['backend'], 'ugen')
-            self.assertTrue(reader['node'].startswith('/dev/ugen'))
-            self.assertIsNotNone(reader['ccid'])          # only CCID devices listed
+            assert reader['backend'] == 'ugen'
+            assert reader['node'].startswith('/dev/ugen')
+            assert reader['ccid'] is not None
 
 
 if __name__ == '__main__':

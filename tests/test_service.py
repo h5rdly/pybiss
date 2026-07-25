@@ -134,6 +134,27 @@ class TestService(unittest.TestCase):
         assert verified is True
 
 
+    def test_verify_server_signature_scheme_c_digest(self):
+        ''' Scheme C: server signs the content DIGEST (BISS contentType=digest).
+            This is what the live registrar (portal.registryagency.bg) actually
+            does - the server pre-signs hash(payload), not the payload. '''
+
+        payload = b"<ds:SignedInfo>the canonical XAdES SignedInfo</ds:SignedInfo>"
+
+        # Sign the DIGEST of the payload, as the registrar's server does
+        payload_hash = hashlib.sha256(payload).digest()
+        signature = sign_rsa_pkcs1_v1_5(payload_hash, TEST_N, TEST_D)
+
+        verified = service.verify_server_signature(
+            payload=payload,
+            signature=signature,
+            server_cert_der=CERT_BYTES,
+            hash_alg='SHA256'
+        )
+
+        assert verified is True
+
+
     def test_verify_server_signature_tampered_fails(self):
         ''' Altered payloads securely fail mathematical validation '''
         

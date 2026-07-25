@@ -1,5 +1,5 @@
 '''
-Manual widget gallery -- eyeball check for the custom tkinter_mods widgets.
+Manual widget gallery -- eyeball check for the tkinter_mods widgets.
 
 Run to sanity-check styling, dark titlebar, placeholder behaviour, scrollbar drag,
 toggle/checkbox state, and notably DPI scaling: drag the window between a 100% and a 150%/200% 
@@ -21,7 +21,7 @@ from src.tkinter_mods import (
 
 
 def build():
-    win = Window(title='pybiss widget gallery', width=560, height=640)
+    win = Window(title='pybiss widget gallery')
 
     Label(win, text='Widget Gallery', font=('Segoe UI', 16, 'bold')).pack(pady=(16, 4))
     Label(win, text='drag me across monitors to test per-monitor DPI').pack(pady=(0, 12))

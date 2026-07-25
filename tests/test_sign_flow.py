@@ -93,15 +93,15 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         body = portal_sign_request(self.document, self.signer_der, self.server_der)
         status, resp = await http_post('/sign', body)
 
-        self.assertEqual(status, 200)
+        assert status == 200
         data = json.loads(resp)
-        self.assertEqual(data['status'], 'ok')
+        assert data['status'] == 'ok'
         # the fake token returns a 256-byte signature beginning AA BB CC
         sig = base64.b64decode(data['signatures'][0])
-        self.assertEqual(len(sig), 256)
-        self.assertEqual(sig[:3], b'\xAA\xBB\xCC')
+        assert len(sig) == 256
+        assert sig[:3] == b'\xAA\xBB\xCC'
         # the card was asked to sign the document itself (CKM_SHA256_RSA_PKCS)
-        self.assertEqual(self.token.last_signed_data, self.document)
+        assert self.token.last_signed_data == self.document
 
     async def test_whitelisted_apdu_card_falls_through_to_pkcs11(self):
         '''
@@ -134,8 +134,8 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
                 config.parser.set('Settings', 'apduWhitelist', orig)
 
         data = json.loads(resp)
-        self.assertEqual(data['status'], 'ok')          # signed via the PKCS#11 fallthrough
-        self.assertEqual(self.token.last_signed_data, self.document)
+        assert data['status'] == 'ok'
+        assert self.token.last_signed_data == self.document
 
     async def test_bad_server_signature_never_reaches_the_card(self):
         ''' A tampered server signature is rejected before any signing happens '''
@@ -145,10 +145,10 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         status, resp = await http_post('/sign', body)
 
         data = json.loads(resp)
-        self.assertEqual(data['status'], 'error')
-        self.assertEqual(data['reasonCode'], 403)
-        self.assertEqual(data['signatures'], [])
-        self.assertIsNone(self.token.last_signed_data)
+        assert data['status'] == 'error'
+        assert data['reasonCode'] == 403
+        assert data['signatures'] == []
+        assert self.token.last_signed_data is None
 
     async def test_user_refusal_aborts_signing(self):
         set_ui_provider(FakeUI(confirm=False))
@@ -156,9 +156,9 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         _, resp = await http_post('/sign', body)
 
         data = json.loads(resp)
-        self.assertEqual(data['status'], 'error')
-        self.assertEqual(data['signatures'], [])
-        self.assertIsNone(self.token.last_signed_data)
+        assert data['status'] == 'error'
+        assert data['signatures'] == []
+        assert self.token.last_signed_data is None
 
     async def test_unknown_signer_certificate_rejected(self):
         ''' Requesting a cert that is not on the card yields 404, no signing '''
@@ -168,14 +168,14 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         _, resp = await http_post('/sign', body)
 
         data = json.loads(resp)
-        self.assertEqual(data['reasonCode'], 404)
-        self.assertIsNone(self.token.last_signed_data)
+        assert data['reasonCode'] == 404
+        assert self.token.last_signed_data is None
 
     async def test_plain_confirm_text_is_shown_verbatim(self):
         body = portal_sign_request(self.document, self.signer_der, self.server_der)
         body['confirmText'] = ['Please authorize this signature']
         await http_post('/sign', body)
-        self.assertEqual(self.ui.last_confirm_text, 'Please authorize this signature')
+        assert self.ui.last_confirm_text == 'Please authorize this signature'
 
     async def test_hash_sentinel_shows_the_content_tail_not_the_word(self):
         ''' confirmText=="hash" means "content is a hash": show its tail, like the daemon '''
@@ -185,14 +185,14 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         await http_post('/sign', body)
 
         content_b64 = body['contents'][0]
-        self.assertEqual(self.ui.last_confirm_text, '...' + content_b64[-20:])
-        self.assertNotEqual(self.ui.last_confirm_text.lower(), 'hash')
+        assert self.ui.last_confirm_text == '...' + content_b64[-20:]
+        assert self.ui.last_confirm_text.lower() != 'hash'
 
     async def test_additional_confirm_text_is_forwarded(self):
         body = portal_sign_request(self.document, self.signer_der, self.server_der)
         body['additionalConfirmText'] = 'Amount: 100 BGN'
         await http_post('/sign', body)
-        self.assertEqual(self.ui.last_confirm_additional, 'Amount: 100 BGN')
+        assert self.ui.last_confirm_additional == 'Amount: 100 BGN'
 
 
 if __name__ == '__main__':
@@ -205,10 +205,10 @@ class TestSignApduHashGuard(unittest.TestCase):
     def test_unsupported_hash_returns_400(self):
         from src.app import _sign_apdu
         r = _sign_apdu(['deadbeef'], 'MD5', b'\x30\x82', ui_provider=None)
-        self.assertEqual(r['status'], 'error')
-        self.assertEqual(r['reasonCode'], 400)
+        assert r['status'] == 'error'
+        assert r['reasonCode'] == 400
 
     def test_supported_hash_map(self):
         from src.app import _APDU_HASH
-        self.assertEqual(_APDU_HASH['SHA256'], ('sha256', 0x42))
-        self.assertEqual(_APDU_HASH['SHA512'], ('sha512', 0x62))
+        assert _APDU_HASH['SHA256'] == ('sha256', 0x42)
+        assert _APDU_HASH['SHA512'] == ('sha512', 0x62)

@@ -108,7 +108,9 @@ class MiniServer:
                 body = await reader.readexactly(content_length) if content_length > 0 else b''
                 req = Request(method, path, headers, body)
 
-                handler = self.routes.get((method, path))
+                # Route on the bare path: portals send cache-busters
+                # (GET /version?_=<ts>), which must still hit /version
+                handler = self.routes.get((method, path.partition('?')[0]))
                 if handler:
                     try:
                         # Support both async and sync endpoints

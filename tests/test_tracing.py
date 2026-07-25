@@ -23,21 +23,21 @@ class TestTracingConnection(unittest.TestCase):
         rec.transmit(b'\x00\xb0\x00\x00')
 
         data = rec.to_dict()
-        self.assertEqual(data['atr'], '3B01')
-        self.assertEqual(data['exchanges'], [
+        assert data['atr'] == '3B01'
+        assert data['exchanges'] == [
             {'apdu': '00A40400', 'response': '6A82'},
             {'apdu': '00B00000', 'response': '9000'},
-        ])
+        ]
 
     def test_transmit_returns_underlying_response_unchanged(self):
         card = self._card([b'\xca\xfe\x90\x00'])
         rec = TracingConnection(card)
-        self.assertEqual(rec.transmit(b'\x00\x01'), b'\xca\xfe\x90\x00')
+        assert rec.transmit(b'\x00\x01') == b'\xca\xfe\x90\x00'
 
     def test_to_dict_lazily_fills_atr(self):
         rec = TracingConnection(self._card([], atr=b'\x3b\x99'))
         # get_atr never called explicitly; to_dict() should still capture it
-        self.assertEqual(rec.to_dict()['atr'], '3B99')
+        assert rec.to_dict()['atr'] == '3B99'
 
     def test_save_writes_loadable_json(self):
         card = self._card([b'\x90\x00'])
@@ -50,7 +50,7 @@ class TestTracingConnection(unittest.TestCase):
             rec.save(path)
             with open(path) as f:
                 loaded = json.load(f)
-        self.assertEqual(loaded, rec.to_dict())
+        assert loaded == rec.to_dict()
 
 
 class TestReplayConnection(unittest.TestCase):
@@ -66,14 +66,18 @@ class TestReplayConnection(unittest.TestCase):
     def test_keyed_replay_matches_by_apdu_order_independent(self):
         conn = ReplayConnection.from_dict(self.TRACE)
         # Query in reverse of recorded order - keyed mode still resolves
-        self.assertEqual(conn.transmit(b'\x00\xb0\x00\x00'), b'\xde\xad\x90\x00')
-        self.assertEqual(conn.transmit(b'\x00\xa4\x04\x00'), b'\x90\x00')
-        self.assertEqual(conn.get_atr(), b'\x3b\x7f')
+        assert conn.transmit(b'\x00\xb0\x00\x00') == b'\xde\xad\x90\x00'
+        assert conn.transmit(b'\x00\xa4\x04\x00') == b'\x90\x00'
+        assert conn.get_atr() == b'\x3b\x7f'
 
     def test_keyed_replay_unknown_apdu_raises(self):
         conn = ReplayConnection.from_dict(self.TRACE)
-        with self.assertRaises(Exception):
+        _raised = False
+        try:
             conn.transmit(b'\x00\xff\xff\xff')
+        except Exception:
+            _raised = True
+        assert _raised, 'Exception not raised'
 
     def test_repeated_apdu_returns_responses_in_order(self):
         trace = {'atr': '', 'exchanges': [
@@ -81,20 +85,24 @@ class TestReplayConnection(unittest.TestCase):
             {'apdu': '00B00000', 'response': 'BB9000'},
         ]}
         conn = ReplayConnection.from_dict(trace)
-        self.assertEqual(conn.transmit(b'\x00\xb0\x00\x00'), b'\xaa\x90\x00')
-        self.assertEqual(conn.transmit(b'\x00\xb0\x00\x00'), b'\xbb\x90\x00')
+        assert conn.transmit(b'\x00\xb0\x00\x00') == b'\xaa\x90\x00'
+        assert conn.transmit(b'\x00\xb0\x00\x00') == b'\xbb\x90\x00'
         # Drained single-shot repeats its last recorded response
-        self.assertEqual(conn.transmit(b'\x00\xb0\x00\x00'), b'\xbb\x90\x00')
+        assert conn.transmit(b'\x00\xb0\x00\x00') == b'\xbb\x90\x00'
 
     def test_sequential_replay_enforces_order(self):
         conn = ReplayConnection.from_dict(self.TRACE, sequential=True)
-        self.assertEqual(conn.transmit(b'\x00\xa4\x04\x00'), b'\x90\x00')
-        self.assertEqual(conn.transmit(b'\x00\xb0\x00\x00'), b'\xde\xad\x90\x00')
+        assert conn.transmit(b'\x00\xa4\x04\x00') == b'\x90\x00'
+        assert conn.transmit(b'\x00\xb0\x00\x00') == b'\xde\xad\x90\x00'
 
     def test_sequential_replay_rejects_wrong_apdu(self):
         conn = ReplayConnection.from_dict(self.TRACE, sequential=True)
-        with self.assertRaises(Exception):
+        _raised = False
+        try:
             conn.transmit(b'\x00\xb0\x00\x00')  # expected 00A40400 first
+        except Exception:
+            _raised = True
+        assert _raised, 'Exception not raised'
 
     def test_roundtrip_record_then_replay_drives_a_driver(self):
         ''' A recorded trace replays identically to the original card '''
@@ -109,9 +117,37 @@ class TestReplayConnection(unittest.TestCase):
         b = rec.transmit(b'\x00\xca\x00\x00')
 
         replay = ReplayConnection.from_dict(rec.to_dict(), sequential=True)
-        self.assertEqual(replay.get_atr(), b'\x3b\x7f')
-        self.assertEqual(replay.transmit(b'\x00\xa4\x04\x00'), a)
-        self.assertEqual(replay.transmit(b'\x00\xca\x00\x00'), b)
+        assert replay.get_atr() == b'\x3b\x7f'
+        assert replay.transmit(b'\x00\xa4\x04\x00') == a
+        assert replay.transmit(b'\x00\xca\x00\x00') == b
+
+
+class TestFixtureReplayDrivesDriver(unittest.TestCase):
+    '''
+    Replay-driven regression per driver: a frozen MiniDriver trace replays
+    through the real IDPrimeDriver with no hardware, catching any regression in
+    the discovery walk against a fixed byte-for-byte ground truth. The fixture
+    is a synthetic 'Test User' card (no PII); the identical walk was verified
+    against a real B-Trust QES token, whose trace is deliberately not committed.
+    '''
+
+    FIXTURE = os.path.join(os.path.dirname(__file__),
+                           'fixtures', 'idprime_minidriver.trace.json')
+
+    def test_idprime_discovery_replays_from_fixture(self):
+        from src.cards import BTrustDriver
+
+        conn = ReplayConnection.load(self.FIXTURE)
+        assert conn.get_atr().hex().upper() == '3B7F96000080318065B085050039120FFE829000'
+        with conn.transaction():
+            driver = BTrustDriver.create(conn)
+            assert driver.__class__.__name__ == 'IDPrimeDriver'
+            certs = driver.discover_certificates()
+
+        assert len(certs) == 1
+        assert certs[0]['label'] == 'kxc00mscp'
+        assert certs[0]['key_ref'] == 0x54
+        assert certs[0]['der'].startswith(b'\x30\x82')
 
 
 if __name__ == '__main__':

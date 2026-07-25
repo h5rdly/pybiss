@@ -179,6 +179,20 @@ def build_self_signed_cert(k: dict, cn: str = 'localhost', days: int = 3650) -> 
     return _pem('CERTIFICATE', cert_der)
 
 
+def _cert_has_san(cert_path: str) -> bool:
+    ''' Whether the PEM at cert_path carries a subjectAltName (OID 2.5.29.17) '''
+
+    import base64
+    try:
+        with open(cert_path, 'rb') as f:
+            pem = f.read()
+        der = base64.b64decode(b''.join(
+            line for line in pem.splitlines() if not line.startswith(b'-----')))
+    except Exception:
+        return False
+    return bytes.fromhex('0603551d11') in der    # DER-encoded OID 2.5.29.17
+
+
 def ensure_localhost_cert(cert_dir: str, bits: int = 2048, announce: bool = True) -> tuple[str, str]:
     ''' Generates a self-signed localhost cert on first use if one is not already present '''
 
@@ -186,7 +200,16 @@ def ensure_localhost_cert(cert_dir: str, bits: int = 2048, announce: bool = True
     key_path = os.path.join(cert_dir, 'localhost.key')
 
     if os.path.exists(cert_path) and os.path.exists(key_path):
-        return cert_path, key_path
+        # Regenerate certs minted before the SAN extension existed: Chromium
+        # ignores CN and requires a SAN, so a CN-only cert fails every browser
+        # with ERR_CERT_COMMON_NAME_INVALID even when explicitly trusted.
+        if _cert_has_san(cert_path):
+            return cert_path, key_path
+        if announce:
+            print('[*] Existing localhost certificate has no subjectAltName '
+                  '(pre-upgrade); regenerating so browsers accept it...', flush=True)
+        for path in (cert_path, key_path):
+            os.remove(path)
 
     os.makedirs(cert_dir, exist_ok=True)
     if announce:
@@ -325,6 +348,19 @@ def _pem_body(text: str) -> str:
     return ''.join(out)
 
 
+def cert_fingerprint(cert_path: str) -> str:
+    ''' Stable SHA-256 hex of the certificate - identifies THIS exact cert, so a
+        regenerated one reads as different (drives the trust re-offer) '''
+
+    import base64
+    try:
+        with open(cert_path, encoding='utf-8') as f:
+            der = base64.b64decode(_pem_body(f.read()))
+        return hashlib.sha256(der).hexdigest()
+    except Exception:
+        return ''
+
+
 def browser_trust_status(cert_path: str, run=None) -> str:
     ''' Is the CURRENT localhost cert trusted in every browser store on this box '''
 
@@ -385,7 +421,11 @@ def install_browser_trust(cert_path: str) -> tuple:
     for db in dbs:
         # Replace any prior copy so re-running is idempotent (ignore delete errors).
         subprocess.run(['certutil', '-d', db, '-D', '-n', _TRUST_NICK], capture_output=True)
-        r = subprocess.run(['certutil', '-d', db, '-A', '-t', 'C,,',
+        # 'P,,' = trusted PEER for SSL, not 'C,,' (trusted CA). Our localhost cert
+        # is a self-signed LEAF (basicConstraints CA:FALSE); trusting it as a CA
+        # makes Chromium reject it with ERR_CERT_INVALID. Peer trust accepts the
+        # exact cert for its SAN - verified against a real browser.
+        r = subprocess.run(['certutil', '-d', db, '-A', '-t', 'P,,',
                             '-n', _TRUST_NICK, '-i', cert_path], capture_output=True)
         if r.returncode != 0:
             return False, f'certutil failed for {db}: {r.stderr.decode(errors="replace").strip()[:200]}'

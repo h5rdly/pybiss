@@ -236,24 +236,36 @@ class TestEncodePin(unittest.TestCase):
 
     def test_default_encoding_matches_btrust_convention(self):
         ''' No card info -> ASCII, padded to 8 bytes with 0xFF '''
-        self.assertEqual(encode_pkcs15_pin('1234'), bytes.fromhex('31323334FFFFFFFF'))
+        assert encode_pkcs15_pin('1234') == bytes.fromhex('31323334FFFFFFFF')
 
     def test_card_derived_stored_length_and_pad_char(self):
         info = {'pin_ref': 0x82, 'stored_length': 6, 'pad_char': 0x00, 'min_length': 4}
-        self.assertEqual(encode_pkcs15_pin('1234', info), bytes.fromhex('313233340000'))
+        assert encode_pkcs15_pin('1234', info) == bytes.fromhex('313233340000')
 
     def test_rejects_pin_longer_than_stored_length(self):
         info = {'stored_length': 6, 'min_length': 4}
-        with self.assertRaises(ValueError):
+        _raised = False
+        try:
             encode_pkcs15_pin('1234567', info)
+        except ValueError:
+            _raised = True
+        assert _raised, 'ValueError not raised'
 
     def test_rejects_pin_shorter_than_min_length(self):
-        with self.assertRaises(ValueError):
+        _raised = False
+        try:
             encode_pkcs15_pin('12')  # default min 4
+        except ValueError:
+            _raised = True
+        assert _raised, 'ValueError not raised'
 
     def test_default_rejects_over_eight(self):
-        with self.assertRaises(ValueError):
+        _raised = False
+        try:
             encode_pkcs15_pin('123456789')
+        except ValueError:
+            _raised = True
+        assert _raised, 'ValueError not raised'
 
 
 if __name__ == '__main__':

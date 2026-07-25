@@ -28,35 +28,35 @@ class TestDescriptors(unittest.TestCase):
                 + f_ccid._ep(0x81, 0x02, 512) + f_ccid._ep(0x02, 0x02, 512)
                 + f_ccid._ep(0x83, 0x03, 8, 7))
         info = ccid.parse_descriptors(blob)
-        self.assertIsNotNone(info['ccid'])
-        self.assertTrue(ccid.is_apdu_level(info['ccid']['dwFeatures']))
-        self.assertEqual((info['ep_in'], info['ep_out']), (0x81, 0x02))
+        assert info['ccid'] is not None
+        assert ccid.is_apdu_level(info['ccid']['dwFeatures'])
+        assert (info['ep_in'], info['ep_out']) == (0x81, 0x02)
 
     def test_interface_declares_no_string(self):
         # FunctionFS sizes its string table from the highest referenced index;
         # a non-zero iInterface would demand a matching table (EINVAL if absent).
-        self.assertEqual(f_ccid.INTERFACE_DESC[8], 0)
+        assert f_ccid.INTERFACE_DESC[8] == 0
 
     def test_functionfs_descriptor_header(self):
         d = f_ccid.build_descriptors()
         magic, length, flags = struct.unpack('<III', d[:12])
-        self.assertEqual(magic, 3)              # FUNCTIONFS_DESCRIPTORS_MAGIC_V2
-        self.assertEqual(flags, 1 | 2)          # HAS_FS_DESC | HAS_HS_DESC
-        self.assertEqual(length, len(d))        # kernel rejects a wrong length
-        self.assertEqual(struct.unpack('<II', d[12:20]), (5, 5))
+        assert magic == 3
+        assert flags == 1 | 2
+        assert length == len(d)
+        assert struct.unpack('<II', d[12:20]) == (5, 5)
 
     def test_functionfs_strings_header(self):
         s = f_ccid.build_strings()
         magic, length, count, langs = struct.unpack('<IIII', s[:16])
-        self.assertEqual(magic, 2)              # FUNCTIONFS_STRINGS_MAGIC
-        self.assertEqual(length, len(s))
-        self.assertEqual((count, langs), (1, 1))
+        assert magic == 2
+        assert length == len(s)
+        assert (count, langs) == (1, 1)
 
     def test_vid_pid_is_one_libccid_binds(self):
         # pcsc-lite matches the CCID *class* driver by VID:PID from libccid's
         # Info.plist - USB class 0x0B alone is not enough (that only gets the
         # kernel to enumerate us). 31AA:7001 is the Circle CCR7115 we mimic.
-        self.assertEqual((f_ccid.VID, f_ccid.PID), ('0x31AA', '0x7001'))
+        assert (f_ccid.VID, f_ccid.PID) == ('0x31AA', '0x7001')
 
 
 class TestDispatchEngine(unittest.TestCase):
@@ -68,36 +68,36 @@ class TestDispatchEngine(unittest.TestCase):
     def _reply(self, mtype, payload=b'', seq=7):
         raw = f_ccid.dispatch(self.card, mtype, payload, 0, seq)
         mt, dlen, slot, rseq, status, error, _x = struct.unpack('<BIBBBBB', raw[:10])
-        self.assertEqual((slot, rseq), (0, seq))     # slot/seq must be echoed
-        self.assertEqual(dlen, len(raw) - 10)        # dwLength must match payload
+        assert (slot, rseq) == (0, seq)
+        assert dlen == len(raw) - 10
         return mt, status, raw[10:]
 
     def test_power_on_returns_the_atr(self):
         mt, status, data = self._reply(0x62)
-        self.assertEqual((mt, status), (0x80, 0x00))  # DataBlock, card active
-        self.assertEqual(data, self.card.get_atr())
+        assert (mt, status) == (0x80, 0x00)
+        assert data == self.card.get_atr()
 
     def test_get_slot_status_reports_card_present(self):
         mt, status, data = self._reply(0x65)
-        self.assertEqual((mt, status, data), (0x81, 0x00, b''))
+        assert (mt, status, data) == (0x81, 0x00, b'')
 
     def test_power_off_reports_inactive(self):
         mt, status, _ = self._reply(0x63)
-        self.assertEqual((mt, status & 0x03), (0x81, 0x01))
+        assert (mt, status & 0x03) == (0x81, 0x01)
 
     def test_xfr_block_reaches_the_card(self):
         mt, status, data = self._reply(0x6F, bytes.fromhex('00A4000C02FF00'))
-        self.assertEqual((mt, status), (0x80, 0x00))
-        self.assertEqual(data, b'\x90\x00')
+        assert (mt, status) == (0x80, 0x00)
+        assert data == b'\x90\x00'
 
     def test_get_parameters_answers_t0(self):
         mt, status, data = self._reply(0x6C)
-        self.assertEqual((mt, status), (0x82, 0x00))  # RDR_to_PC_Parameters
-        self.assertEqual(data, f_ccid._T0_PARAMS)
+        assert (mt, status) == (0x82, 0x00)
+        assert data == f_ccid._T0_PARAMS
 
     def test_unknown_message_gets_a_status_reply(self):
         mt, status, _ = self._reply(0x99)
-        self.assertEqual((mt, status), (0x81, 0x00))
+        assert (mt, status) == (0x81, 0x00)
 
 
 class TestFullConversationOverTheWire(unittest.TestCase):
@@ -126,22 +126,30 @@ class TestFullConversationOverTheWire(unittest.TestCase):
 
         drv = BTrustDriver.create(WireConn())
         certs = drv.discover_certificates()
-        self.assertEqual(len(certs), 1)
+        assert len(certs) == 1
 
         n, e = get_rsa_public_key(certs[0]['der'])
         sig = drv.sign('1234', hashlib.sha256(b'wire').digest(),
                        key_ref=certs[0]['key_ref'])
-        self.assertTrue(verify_rsa_pkcs1_v1_5(b'wire', sig, n, e, 'SHA256'))
+        assert verify_rsa_pkcs1_v1_5(b'wire', sig, n, e, 'SHA256')
 
 
 _GADGET_ATR = f_ccid.synthetic_idprime_card().get_atr().hex().upper()
 
 
 def _pcsc_reader():
-    ''' The gadget as seen through pcscd, if pcscd is up and bound to it '''
+    '''
+    The gadget as seen through pcscd, if pcscd is up and bound to it.
+
+    Match the gadget's OWN product string ('Virtual CCID Reader', see
+    f_ccid.py), never 'CCR7115' - that is the name of the *real* Circle reader,
+    and the synthetic card shares the real card's ATR, so a name match is the
+    only thing that keeps this live test (which signs with PIN 1234) off a real
+    QES token. A wrong PIN there burns retry counters and eventually bricks it.
+    '''
 
     from src import detector
-    return next((r for r in detector.get_readers() if 'CCR7115' in r), None)
+    return next((r for r in detector.get_readers() if 'Virtual CCID' in r), None)
 
 
 @unittest.skipIf(_virtual_reader() is None,
@@ -160,14 +168,14 @@ class TestLiveGadgetDirect(unittest.TestCase):
                 self.skipTest(f'pcscd holds the interface, as intended: {e}')
             raise
         try:
-            self.assertEqual(conn.get_atr().hex().upper(), _GADGET_ATR)
+            assert conn.get_atr().hex().upper() == _GADGET_ATR
             drv = BTrustDriver.create(conn)
             certs = drv.discover_certificates()
-            self.assertEqual(len(certs), 1)
+            assert len(certs) == 1
             n, e = get_rsa_public_key(certs[0]['der'])
             sig = drv.sign('1234', hashlib.sha256(b'live').digest(),
                            key_ref=certs[0]['key_ref'])
-            self.assertTrue(verify_rsa_pkcs1_v1_5(b'live', sig, n, e, 'SHA256'))
+            assert verify_rsa_pkcs1_v1_5(b'live', sig, n, e, 'SHA256')
         finally:
             conn_cm.__exit__(None, None, None)
 
@@ -188,8 +196,8 @@ class TestLiveGadgetViaPcsc(unittest.TestCase):
     def test_detector_sees_the_card(self):
         from src import detector
         atrs = detector.get_connected_atrs()
-        self.assertIn(_GADGET_ATR, atrs)
-        self.assertEqual(detector.identify_provider(_GADGET_ATR), 'GEMALTO')
+        assert _GADGET_ATR in atrs
+        assert detector.identify_provider(_GADGET_ATR) == 'GEMALTO'
 
     def test_app_getsigner_and_sign_end_to_end(self):
         import base64
@@ -197,17 +205,17 @@ class TestLiveGadgetViaPcsc(unittest.TestCase):
 
         res = app._getsigner_apdu(selector=None, show_valid_certs=False,
                                   ui_provider=self._UI())
-        self.assertEqual(res['status'], 'ok')
+        assert res['status'] == 'ok'
         der = base64.b64decode(res['chain'][0])
 
         payload = b'signed through pcscd, libccid and a virtual USB bus'
         res = app._sign_apdu([base64.b64encode(payload).decode()], 'SHA256',
                              der, self._UI())
-        self.assertEqual(res['status'], 'ok')
+        assert res['status'] == 'ok'
 
         sig = base64.b64decode(res['signatures'][0])
         n, e = get_rsa_public_key(der)
-        self.assertTrue(verify_rsa_pkcs1_v1_5(payload, sig, n, e, 'SHA256'))
+        assert verify_rsa_pkcs1_v1_5(payload, sig, n, e, 'SHA256')
 
 
 if __name__ == '__main__':

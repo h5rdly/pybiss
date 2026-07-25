@@ -15,14 +15,18 @@ from synthetic_card import synthetic_idprime_card
 class TestFraming(unittest.TestCase):
 
     def test_frame_prefixes_a_big_endian_length(self):
-        self.assertEqual(vpcd_card.frame(b'\x90\x00'), b'\x00\x02\x90\x00')
-        self.assertEqual(vpcd_card.frame(b''), b'\x00\x00')
+        assert vpcd_card.frame(b'\x90\x00') == b'\x00\x02\x90\x00'
+        assert vpcd_card.frame(b'') == b'\x00\x00'
 
     def test_recv_exact_raises_when_the_peer_hangs_up(self):
         a, b = socket.socketpair()
         b.close()
-        with self.assertRaises(vpcd_card.Disconnected):
+        _raised = False
+        try:
             vpcd_card.recv_exact(a, 4)
+        except vpcd_card.Disconnected:
+            _raised = True
+        assert _raised, 'vpcd_card.Disconnected not raised'
         a.close()
 
 
@@ -34,16 +38,16 @@ class TestHandleMessage(unittest.TestCase):
 
     def test_atr_request_is_answered(self):
         reply = vpcd_card.handle_message(self.card, bytes([vpcd_card.CTRL_ATR]))
-        self.assertEqual(reply, vpcd_card.frame(self.card.get_atr()))
+        assert reply == vpcd_card.frame(self.card.get_atr())
 
     def test_power_and_reset_are_silent(self):
         # Replying to these would desync the length-prefixed stream.
         for cmd in (vpcd_card.CTRL_OFF, vpcd_card.CTRL_ON, vpcd_card.CTRL_RESET):
-            self.assertIsNone(vpcd_card.handle_message(self.card, bytes([cmd])))
+            assert vpcd_card.handle_message(self.card, bytes([cmd])) is None
 
     def test_apdu_goes_straight_to_the_card(self):
         reply = vpcd_card.handle_message(self.card, bytes.fromhex('00A4000C02FF00'))
-        self.assertEqual(reply, vpcd_card.frame(b'\x90\x00'))
+        assert reply == vpcd_card.frame(b'\x90\x00')
 
     def test_reset_is_forwarded_to_a_card_that_wants_it(self):
         class Resettable:
@@ -54,10 +58,10 @@ class TestHandleMessage(unittest.TestCase):
 
         card = Resettable()
         vpcd_card.handle_message(card, bytes([vpcd_card.CTRL_RESET]))
-        self.assertTrue(card.was_reset)
+        assert card.was_reset
 
     def test_empty_message_is_ignored(self):
-        self.assertIsNone(vpcd_card.handle_message(self.card, b''))
+        assert vpcd_card.handle_message(self.card, b'') is None
 
 
 class TestOverARealSocket(unittest.TestCase):
@@ -91,14 +95,12 @@ class TestOverARealSocket(unittest.TestCase):
         return vpcd_card.recv_exact(self.vpcd, size)
 
     def test_atr_over_the_wire(self):
-        self.assertEqual(self._request(bytes([vpcd_card.CTRL_ATR])),
-                         self.card.get_atr())
+        assert self._request(bytes([vpcd_card.CTRL_ATR])) == self.card.get_atr()
 
     def test_power_on_then_atr(self):
         # power-on is silent, so the next reply must be the ATR (stream in sync)
         self.vpcd.sendall(vpcd_card.frame(bytes([vpcd_card.CTRL_ON])))
-        self.assertEqual(self._request(bytes([vpcd_card.CTRL_ATR])),
-                         self.card.get_atr())
+        assert self._request(bytes([vpcd_card.CTRL_ATR])) == self.card.get_atr()
 
     def test_discover_and_sign_across_the_socket(self):
         request = self._request
@@ -118,12 +120,12 @@ class TestOverARealSocket(unittest.TestCase):
 
         drv = BTrustDriver.create(WireConn())
         certs = drv.discover_certificates()
-        self.assertEqual(len(certs), 1)
+        assert len(certs) == 1
 
         n, e = get_rsa_public_key(certs[0]['der'])
         sig = drv.sign('1234', hashlib.sha256(b'vpcd').digest(),
                        key_ref=certs[0]['key_ref'])
-        self.assertTrue(verify_rsa_pkcs1_v1_5(b'vpcd', sig, n, e, 'SHA256'))
+        assert verify_rsa_pkcs1_v1_5(b'vpcd', sig, n, e, 'SHA256')
 
 
 class TestConfHelper(unittest.TestCase):
@@ -135,11 +137,11 @@ class TestConfHelper(unittest.TestCase):
             vpcd_card.print_conf(35963)
         text = out.getvalue()
         if sys.platform == 'darwin':
-            self.assertIn('SmartCardServices', text)
+            assert 'SmartCardServices' in text
         else:
             # DEVICENAME carries the port (/dev/null:0x8C7B), not a bare /dev/null
-            self.assertIn('DEVICENAME   /dev/null:0x8C7B', text)
-            self.assertIn('CHANNELID    0x8C7B', text)
+            assert 'DEVICENAME   /dev/null:0x8C7B' in text
+            assert 'CHANNELID    0x8C7B' in text
 
 
 def _vpcd_reader():
@@ -158,7 +160,7 @@ class TestLiveViaPcsc(unittest.TestCase):
     def test_detector_sees_the_card(self):
         from src import detector
         expected = synthetic_idprime_card().get_atr().hex().upper()
-        self.assertIn(expected, detector.get_connected_atrs())
+        assert expected in detector.get_connected_atrs()
 
     def test_app_getsigner_and_sign_end_to_end(self):
         import base64
@@ -170,16 +172,16 @@ class TestLiveViaPcsc(unittest.TestCase):
 
         res = app._getsigner_apdu(selector=None, show_valid_certs=False,
                                   ui_provider=UI())
-        self.assertEqual(res['status'], 'ok')
+        assert res['status'] == 'ok'
         der = base64.b64decode(res['chain'][0])
 
         payload = b'signed through pcscd and vpcd, no USB at all'
         res = app._sign_apdu([base64.b64encode(payload).decode()], 'SHA256', der, UI())
-        self.assertEqual(res['status'], 'ok')
+        assert res['status'] == 'ok'
 
         sig = base64.b64decode(res['signatures'][0])
         n, e = get_rsa_public_key(der)
-        self.assertTrue(verify_rsa_pkcs1_v1_5(payload, sig, n, e, 'SHA256'))
+        assert verify_rsa_pkcs1_v1_5(payload, sig, n, e, 'SHA256')
 
 
 if __name__ == '__main__':

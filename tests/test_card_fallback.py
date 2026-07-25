@@ -1,4 +1,5 @@
 import sys, unittest
+import types
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
@@ -34,30 +35,34 @@ class TestCardConnectionFallback(unittest.TestCase):
         used = []
         with app._CardConnection(pcsc_factory=lambda: (used.append('pcsc'), pcsc)[1],
                                  ccid_factory=lambda: (used.append('ccid'), ccid)[1]) as conn:
-            self.assertIs(conn, self.card)
-        self.assertEqual(used, ['pcsc'])          # direct CCID never even tried
-        self.assertTrue(pcsc.closed)
+            assert conn is self.card
+        assert used == ['pcsc']
+        assert pcsc.closed
 
     def test_falls_back_to_direct_ccid_when_pcsc_finds_nothing(self):
         ccid = _Card(self.card)
         with app._CardConnection(pcsc_factory=lambda: _Boom('No smart card readers detected.'),
                                  ccid_factory=lambda: ccid) as conn:
-            self.assertIs(conn, self.card)
-        self.assertTrue(ccid.closed)              # the fallback is the one we close
+            assert conn is self.card
+        assert ccid.closed
 
     def test_both_failing_reports_both_reasons(self):
-        with self.assertRaises(app.CardUnreachable) as caught:
+        caught = None
+        try:
             with app._CardConnection(pcsc_factory=lambda: _Boom('no pcscd'),
                                      ccid_factory=lambda: _Boom('no usbfs reader')):
                 pass
+        except app.CardUnreachable as _e:
+            caught = types.SimpleNamespace(exception=_e)
+        assert caught is not None, 'app.CardUnreachable not raised'
         text = str(caught.exception)
-        self.assertIn('no pcscd', text)           # a user has to see BOTH failures
-        self.assertIn('no usbfs reader', text)
+        assert 'no pcscd' in text
+        assert 'no usbfs reader' in text
 
     def test_exit_is_safe_when_nothing_ever_opened(self):
         cm = app._CardConnection(pcsc_factory=lambda: _Boom('x'),
                                  ccid_factory=lambda: _Boom('y'))
-        self.assertFalse(cm.__exit__(None, None, None))
+        assert not cm.__exit__(None, None, None)
 
 
 class TestBackendReportsTheRealReason(unittest.TestCase):
@@ -74,11 +79,15 @@ class TestBackendReportsTheRealReason(unittest.TestCase):
 
     def test_getsigner_apdu_explains_both_transports(self):
         from src import backends
-        with self.assertRaises(backends.BackendUnavailable) as caught:
+        caught = None
+        try:
             app._getsigner_apdu(selector=None, show_valid_certs=False, ui_provider=None)
+        except backends.BackendUnavailable as _e:
+            caught = types.SimpleNamespace(exception=_e)
+        assert caught is not None, 'backends.BackendUnavailable not raised'
         text = str(caught.exception)
-        self.assertIn('pcscd is not running', text)
-        self.assertIn('no direct-CCID reader found', text)
+        assert 'pcscd is not running' in text
+        assert 'no direct-CCID reader found' in text
 
 
 class TestProductionDefaults(unittest.TestCase):
@@ -86,15 +95,15 @@ class TestProductionDefaults(unittest.TestCase):
 
     def test_open_card_returns_a_fallback_connection(self):
         cm = app._open_card()
-        self.assertIsInstance(cm, app._CardConnection)
-        self.assertIs(cm._pcsc_factory, app._pcsc_factory)
-        self.assertIs(cm._ccid_factory, app._ccid_factory)
+        assert isinstance(cm, app._CardConnection)
+        assert cm._pcsc_factory is app._pcsc_factory
+        assert cm._ccid_factory is app._ccid_factory
 
     def test_factories_build_the_real_transports(self):
         from src.sc_ffi import SmartCardConnection
         from src.ccid import CcidConnection
-        self.assertIsInstance(app._pcsc_factory(), SmartCardConnection)
-        self.assertIsInstance(app._ccid_factory(), CcidConnection)
+        assert isinstance(app._pcsc_factory(), SmartCardConnection)
+        assert isinstance(app._ccid_factory(), CcidConnection)
 
 
 if __name__ == '__main__':

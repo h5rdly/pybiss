@@ -19,6 +19,9 @@ class ConfigManager:
             'pkcs11Path': '',
             'pfxPath': '',
             'language': 'en',
+            'font': 'Segoe UI',
+            'fontFetched': 'False',
+            'theme': 'dark',
             'osStarted': 'True',
             'newSacRequired': 'True',
             'apduWhitelist': ''

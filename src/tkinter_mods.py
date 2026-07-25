@@ -1,4 +1,5 @@
 import logging, os, sys, tkinter as tk
+from tkinter import font as tkfont
 
 if sys.platform.startswith('win'):
     import winreg
@@ -7,15 +8,190 @@ else:
 
 
 class Theme:
-    BG = '#242424'          # Main Window Background
-    SURFACE = '#343638'     # Entry/Frame Background
-    TEXT = '#DCE4EE'        # Main Text
-    BORDER = '#565B5E'      # Borders
-    PRIMARY = '#1F6AA5'     # Button Default
-    HOVER = '#144870'       # Button Hover
-    DANGER = '#E74C3C'      # Reject Button
-    DANGER_HOVER = '#C0392B'
-    FONT = ('Segoe UI', 12)
+    '''
+    The active colour palette, plus LIVE (no-restart) dark/light switching -
+    the visual analogue of Font. Widgets just read Theme.BG / Theme.TEXT / ...;
+    the dashboard calls Theme.apply(mode) then Theme.apply_live(root, mapping)
+    to repaint the whole tree in place.
+    '''
+
+    # Every themed colour, keyed identically in both palettes. DANGER stays red
+    # in both, so it simply never enters the switch mapping.
+    _DARK = {
+        'BG':           '#242424',   # window background
+        'SURFACE':      '#343638',   # entry / frame background
+        'SIDEBAR':      '#1E1E1E',   # nav rail + log console (a recessed panel)
+        'TEXT':         '#DCE4EE',   # main text
+        'TEXT_MUTED':   '#7A8288',   # secondary / hint text
+        'CONSOLE_TEXT': '#A9B7C6',   # log console text
+        'BORDER':       '#565B5E',
+        'PRIMARY':      '#1F6AA5',   # button default / selected
+        'HOVER':        '#144870',
+        'SUCCESS':      '#2CC985',   # status-ok text + authorize button
+        'SUCCESS_HOVER':'#106A43',
+        'DANGER':       '#E74C3C',
+        'DANGER_HOVER': '#C0392B',
+    }
+    _LIGHT = {
+        'BG':           '#EBEBEB',
+        'SURFACE':      '#FFFFFF',
+        'SIDEBAR':      '#DCDCDC',
+        'TEXT':         '#1A1A1A',
+        'TEXT_MUTED':   '#6A6F75',
+        'CONSOLE_TEXT': '#3A3F45',
+        'BORDER':       '#B4B8BC',
+        'PRIMARY':      '#3B8ED0',
+        'HOVER':        '#36719F',
+        'SUCCESS':      '#1E9E5E',
+        'SUCCESS_HOVER':'#17784A',
+        'DANGER':       '#E74C3C',
+        'DANGER_HOVER': '#C0392B',
+    }
+    _PALETTES = {'dark': _DARK, 'light': _LIGHT}
+    KEYS = tuple(_DARK)
+
+    MODE = 'dark'
+    # Class attributes hold the CURRENT palette so every `Theme.BG` read works
+    BG = _DARK['BG']
+    SURFACE = _DARK['SURFACE']
+    SIDEBAR = _DARK['SIDEBAR']
+    TEXT = _DARK['TEXT']
+    TEXT_MUTED = _DARK['TEXT_MUTED']
+    CONSOLE_TEXT = _DARK['CONSOLE_TEXT']
+    BORDER = _DARK['BORDER']
+    PRIMARY = _DARK['PRIMARY']
+    HOVER = _DARK['HOVER']
+    SUCCESS = _DARK['SUCCESS']
+    SUCCESS_HOVER = _DARK['SUCCESS_HOVER']
+    DANGER = _DARK['DANGER']
+    DANGER_HOVER = _DARK['DANGER_HOVER']
+
+    # tk colour OPTIONS and cached-colour ATTRIBUTES that apply_live re-tints
+    _COLOR_OPTS = ('bg', 'background', 'fg', 'foreground', 'insertbackground',
+                   'highlightbackground', 'highlightcolor',
+                   'selectbackground', 'selectforeground',
+                   'activebackground', 'activeforeground')
+    _COLOR_ATTRS = ('fg_color', 'hover_color')
+
+    @classmethod
+    def resolve(cls, mode):
+        ''' 'dark'/'light' as given; 'system'/'auto'/None -> the OS setting,
+            falling back to dark when the OS can't be read. '''
+
+        if mode in ('dark', 'light'):
+            return mode
+        return detect_system_theme() or 'dark'
+
+    @classmethod
+    def apply(cls, mode):
+        '''
+        Point the whole UI at a palette. Returns an {old_hex: new_hex} mapping
+        (lower-cased keys) of every colour that actually changed, for
+        apply_live to repaint already-built widgets.
+        '''
+
+        mode = cls.resolve(mode)
+        palette = cls._PALETTES[mode]
+        mapping = {}
+        for key, new in palette.items():
+            old = getattr(cls, key, None)
+            if old is not None and old.lower() != new.lower():
+                mapping[old.lower()] = new
+            setattr(cls, key, new)
+        cls.MODE = mode
+        return mapping
+
+    @classmethod
+    def apply_live(cls, widget, mapping):
+        '''
+        Repaint one widget subtree in place - live, no restart. Remaps any
+        colour OPTION or cached colour ATTRIBUTE whose value changed, recurses,
+        then redraws canvas widgets (which re-read Theme.* in their _draw).
+        '''
+
+        if mapping:
+            for opt in cls._COLOR_OPTS:
+                try:
+                    current = str(widget.cget(opt))
+                except (tk.TclError, AttributeError, TypeError):
+                    continue                       # widget lacks this option
+                new = mapping.get(current.lower())
+                if new:
+                    try:
+                        widget.configure(**{opt: new})
+                    except tk.TclError:
+                        pass
+            for attr in cls._COLOR_ATTRS:
+                value = getattr(widget, attr, None)
+                if isinstance(value, str) and value.lower() in mapping:
+                    setattr(widget, attr, mapping[value.lower()])
+
+        for child in widget.winfo_children():
+            cls.apply_live(child, mapping)
+
+        if hasattr(widget, '_draw'):
+            try:
+                widget._draw()
+            except Exception:
+                pass                               # a half-built widget must not abort the walk
+
+
+class Font:
+    '''
+    All the UI-font logic in one place: the active family, the shared base tuple,
+    family resolution, and LIVE (no-restart) family switching across the whole
+    widget tree. Widgets just read Font.FAMILY / Font.FONT; the dashboard calls
+    Font.resolve() / Font.apply() / Font.apply_live() to change it.
+    '''
+
+    FAMILY = 'Segoe UI'       # overridden by apply(); resolve() picks a real one
+    FONT = (FAMILY, 12)       # default (family, size) used by Label/Entry/Button
+
+    @classmethod
+    def resolve(cls, preferred):
+        ''' The configured family if the system has it, else the OS/Tk default UI
+            family (what Tk substitutes anyway). Needs a Tk root to exist. '''
+
+        if preferred and preferred.lower() in {f.lower() for f in tkfont.families()}:
+            return preferred
+        return tkfont.nametofont('TkDefaultFont').actual('family')
+
+    @classmethod
+    def apply(cls, family):
+        ''' Point the whole UI at a family (updates the base tuple too). '''
+
+        cls.FAMILY = family
+        cls.FONT = (family, cls.FONT[1])
+
+    @classmethod
+    def apply_live(cls, widget):
+        '''
+        Swap every widget's font family to cls.FAMILY in place - live, no restart.
+        Keeps each font's size/modifiers, then redraws canvas widgets (Button/
+        Entry/Textbox rebuild from Font.FAMILY in _draw). A widget on a NAMED
+        tkinter Font (the sidebar nav) is handled by reconfiguring that Font.
+        '''
+
+        try:
+            current = widget.cget('font')
+            if current:
+                if isinstance(current, str):
+                    try:
+                        tkfont.nametofont(current).configure(family=cls.FAMILY)
+                    except tk.TclError:
+                        parts = current.split()                    # "Family size ..."
+                        if len(parts) >= 2:
+                            widget.configure(font=(cls.FAMILY, *parts[1:]))
+                elif isinstance(current, tuple) and len(current) >= 2:
+                    widget.configure(font=(cls.FAMILY, *current[1:]))
+        except (tk.TclError, ValueError):
+            pass                        # no font attr (raw Frame/Canvas), or odd tuple
+
+        for child in widget.winfo_children():
+            cls.apply_live(child)
+
+        if hasattr(widget, '_draw'):
+            widget._draw()
 
 
 def detect_system_theme():
@@ -146,15 +322,18 @@ class DpiTracker:
             return                                # interpreter shutting down
 
 
-def set_dark_titlebar(window):
-    ''' Force the native Windows titlebar into Dark Mode '''
+def set_dark_titlebar(window, dark=None):
+    ''' Match the native Windows titlebar to the active theme (dark by default) '''
+
+    if dark is None:
+        dark = getattr(Theme, 'MODE', 'dark') == 'dark'
 
     if sys.platform.startswith('win'):
         try:
             import ctypes
             window.update_idletasks() # Window must exist before getting HWND
             hwnd = ctypes.windll.user32.GetParent(window.winfo_id())
-            value = ctypes.c_int(1)
+            value = ctypes.c_int(1 if dark else 0)
             # DWMWA_USE_IMMERSIVE_DARK_MODE (Windows 11) = 20, (Windows 10) = 19
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(value), 4)
             ctypes.windll.dwmapi.DwmSetWindowAttribute(hwnd, 19, ctypes.byref(value), 4)
@@ -181,7 +360,7 @@ def grab_when_viewable(window, attempts=40):
 
 
 def draw_rounded_rect(canvas, x1, y1, x2, y2, radius, **kwargs):
-    ''' The exact bezier-smoothing trick CustomTkinter uses for rounded corners '''
+    ''' bezier-smoothing for rounded corners '''
 
     points = [
         x1+radius, y1, x1+radius, y1, x2-radius, y1, x2-radius, y1,
@@ -198,14 +377,14 @@ class Label(tk.Label):
     def __init__(self, master, text='', **kwargs):
         # Allow overriding fg, but default to Theme.TEXT
         fg = kwargs.pop('fg', Theme.TEXT)
-        font = kwargs.pop('font', Theme.FONT)
+        font = kwargs.pop('font', Font.FONT)
         super().__init__(master, text=text, bg=Theme.BG, fg=fg, font=font, **kwargs)
 
 
 class Window(tk.Tk):
     ''' DPI-aware Tkinter root window that prevents the white flash phenomena on boot '''
     
-    def __init__(self, title="App", width=800, height=600):
+    def __init__(self, title="App"):
 
         # Enable High-DPI awareness on Windows BEFORE window creation
         if sys.platform.startswith('win'):
@@ -238,14 +417,21 @@ class Window(tk.Tk):
         # via Tk's own 'tk scaling', so fonts only need the ratio current/startup
         self._startup_dpi_scale = get_window_dpi_scale(self) or 1.0
         self._dpi_scale = self._startup_dpi_scale
-        width = int(width * self._dpi_scale)
-        height = int(height * self._dpi_scale)
 
-        # Center the window perfectly based on the new DPI-aware dimensions
+        # Open at exactly half the screen in each dimension (a quarter of the
+        # area), clamped to a usable minimum and never past the screen edge.
+        # Screen dims are device pixels - deliberately NOT multiplied by the DPI
+        # factor: doing so inflated the window on HiDPI so the bottom edge sat at
+        # the screen bottom. The passed width/height are nominal only now.
+        sw, sh = self.winfo_screenwidth(), self.winfo_screenheight()
+        width = min(max(sw // 2, 640), sw - 80)
+        height = min(max(sh // 2, 480), sh - 80)
+
+        # Center the window on screen
         self.geometry(f'{width}x{height}')
         self.update_idletasks()
-        x = (self.winfo_screenwidth() // 2) - (width // 2)
-        y = (self.winfo_screenheight() // 2) - (height // 2)
+        x = (sw // 2) - (width // 2)
+        y = (sh // 2) - (height // 2)
         self.geometry(f'+{x}+{y}')
 
         # Zooming/Scaling
@@ -403,6 +589,11 @@ class Window(tk.Tk):
         # Trigger a physical redraw if the widget has one
         if hasattr(widget, '_draw'):
             widget._draw()
+
+
+    def apply_font_family_live(self):
+        ''' Live "Apply Font" across this window - see Font.apply_live. '''
+        Font.apply_live(self)
         
 
 class MessageBox:
@@ -427,7 +618,7 @@ class MessageBox:
 
         # Message Label
         tk.Label(dialog, text=message, bg=Theme.BG, fg=Theme.TEXT, 
-                 font=('Segoe UI', 12), wraplength=350, justify='center').pack(expand=True, fill='both', padx=20, pady=20)
+                 font=(Font.FAMILY, 12), wraplength=350, justify='center').pack(expand=True, fill='both', padx=20, pady=20)
         
         result = {'value': False}
         
@@ -550,11 +741,18 @@ class Button(tk.Canvas):
         s = getattr(tl, 'ui_scale', 1.0)                  # geometry: absolute factor
         fscale = getattr(tl, 'font_scale', s)             # font: zoom * DPI ratio
         radius = self.corner_radius * s
+        font = (Font.FAMILY, int(11*fscale), 'bold')
+
+        needed = tkfont.Font(family=Font.FAMILY, size=int(11*fscale),
+                             weight='bold').measure(self.text) + int(24*fscale)
+        if needed > w:
+            self.config(width=needed)
+            w = _even(needed)
 
         self.rect_id = draw_rounded_rect(self, 0, 0, w, h, radius, fill=self.fg_color)
 
         self.text_id = self.create_text(w/2, h/2, text=self.text, fill=Theme.TEXT,
-                                        font=('Segoe UI', int(11*fscale), 'bold'))
+                                        font=font)
 
 
     def _on_enter(self, event):
@@ -585,8 +783,8 @@ class Entry(tk.Frame):
         draw_rounded_rect(self.canvas, 1, 1, width-1, height-1, corner_radius, fill=Theme.SURFACE, outline=Theme.BORDER, width=2)
 
         # Inner native entry
-        self.entry = tk.Entry(self, bg=Theme.SURFACE, fg=Theme.TEXT, insertbackground='white',
-                              relief='flat', highlightthickness=0, font=Theme.FONT, show=show)
+        self.entry = tk.Entry(self, bg=Theme.SURFACE, fg=Theme.TEXT, insertbackground=Theme.TEXT,
+                              relief='flat', highlightthickness=0, font=Font.FONT, show=show)
         self.entry.place(relx=0.05, rely=0.1, relwidth=0.9, relheight=0.8)
 
         self._show = show
@@ -643,7 +841,7 @@ class Checkbox(tk.Frame):
         self.canvas = tk.Canvas(self, width=24, height=24, bg=Theme.BG, highlightthickness=0)
         self.canvas.pack(side="left", padx=(0, 10))
         
-        self.label = tk.Label(self, text=text, bg=Theme.BG, fg=Theme.TEXT, font=Theme.FONT)
+        self.label = tk.Label(self, text=text, bg=Theme.BG, fg=Theme.TEXT, font=Font.FONT)
         self.label.pack(side="left")
         
         # Bind clicks on both the box and the label
@@ -693,7 +891,7 @@ class Toggle(tk.Frame):
         self.canvas = tk.Canvas(self, width=44, height=24, bg=Theme.BG, highlightthickness=0)
         self.canvas.pack(side="left", padx=(0, 10))
         
-        self.label = tk.Label(self, text=text, bg=Theme.BG, fg=Theme.TEXT, font=Theme.FONT)
+        self.label = tk.Label(self, text=text, bg=Theme.BG, fg=Theme.TEXT, font=Font.FONT)
         self.label.pack(side="left")
         
         self.canvas.bind("<Button-1>", self.toggle)
@@ -815,7 +1013,7 @@ class Listbox(Frame):
         
         list_kwargs = dict(bg=Theme.SURFACE, fg=Theme.TEXT, selectbackground=Theme.PRIMARY, 
                            selectforeground='white', relief='flat', borderwidth=0, 
-                           font=('Segoe UI', 10), highlightthickness=0)
+                           font=(Font.FAMILY, 10), highlightthickness=0)
         list_kwargs.update(kwargs)
         
         self.listbox = tk.Listbox(self.inner, yscrollcommand=self.scrollbar.set, **list_kwargs)

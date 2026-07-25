@@ -20,42 +20,42 @@ class TestParseDescriptors(unittest.TestCase):
         self.info = ccid.parse_descriptors(REAL_BLOB)
 
     def test_finds_the_ccid_interface_and_endpoints(self):
-        self.assertEqual(self.info['iface'], 0)
-        self.assertEqual(self.info['ep_out'], 0x02)   # bulk OUT
-        self.assertEqual(self.info['ep_in'], 0x81)    # bulk IN
+        assert self.info['iface'] == 0
+        assert self.info['ep_out'] == 0x02
+        assert self.info['ep_in'] == 0x81
 
     def test_reads_ccid_functional_descriptor(self):
         c = self.info['ccid']
-        self.assertIsNotNone(c)
-        self.assertEqual(c['dwFeatures'], 0x000404BA)
-        self.assertEqual(c['dwMaxCCIDMessageLength'], 273)
-        self.assertEqual(c['dwProtocols'], 0x03)       # T=0 and T=1
-        self.assertEqual(c['bPINSupport'], 0x00)
+        assert c is not None
+        assert c['dwFeatures'] == 0x000404BA
+        assert c['dwMaxCCIDMessageLength'] == 273
+        assert c['dwProtocols'] == 0x03
+        assert c['bPINSupport'] == 0x00
 
     def test_no_ccid_interface_returns_none(self):
         # A device descriptor with a single non-CCID (class 0xFF) interface
         blob = bytes.fromhex('09040000020600000705810240000007050202400000')
-        self.assertIsNone(ccid.parse_descriptors(blob)['ccid'])
+        assert ccid.parse_descriptors(blob)['ccid'] is None
 
     def test_empty_blob_is_safe(self):
         got = ccid.parse_descriptors(b'')
-        self.assertIsNone(got['ccid'])
-        self.assertIsNone(got['iface'])
+        assert got['ccid'] is None
+        assert got['iface'] is None
 
 
 class TestExchangeLevel(unittest.TestCase):
 
     def test_decodes_each_level(self):
-        self.assertEqual(ccid.exchange_level(0x00000000), 'character')
-        self.assertEqual(ccid.exchange_level(0x00010000), 'tpdu')
-        self.assertEqual(ccid.exchange_level(0x00020000), 'short_apdu')
-        self.assertEqual(ccid.exchange_level(0x000404BA), 'extended_apdu')
+        assert ccid.exchange_level(0x00000000) == 'character'
+        assert ccid.exchange_level(0x00010000) == 'tpdu'
+        assert ccid.exchange_level(0x00020000) == 'short_apdu'
+        assert ccid.exchange_level(0x000404BA) == 'extended_apdu'
 
     def test_apdu_level_gate(self):
-        self.assertTrue(ccid.is_apdu_level(0x000404BA))   # our real reader
-        self.assertTrue(ccid.is_apdu_level(0x00020000))
-        self.assertFalse(ccid.is_apdu_level(0x00010000))  # TPDU - unsupported
-        self.assertFalse(ccid.is_apdu_level(0x00000000))  # character
+        assert ccid.is_apdu_level(0x000404BA)
+        assert ccid.is_apdu_level(0x00020000)
+        assert not ccid.is_apdu_level(0x00010000)
+        assert not ccid.is_apdu_level(0x00000000)
 
 
 class TestGetResponseHandling(unittest.TestCase):
@@ -81,8 +81,8 @@ class TestGetResponseHandling(unittest.TestCase):
     def test_plain_response_passes_through(self):
         xfr, sent = self._replay([(None, bytes.fromhex('6f1d9000'))])
         out = ccid.transmit_iso7816(xfr, bytes.fromhex('00A40000023F00'))
-        self.assertEqual(out, bytes.fromhex('6f1d9000'))
-        self.assertEqual(len(sent), 1)
+        assert out == bytes.fromhex('6f1d9000')
+        assert len(sent) == 1
 
     def test_61xx_triggers_get_response_and_appends(self):
         # First reply is 61 1F (31 bytes waiting); then GET RESPONSE returns them.
@@ -94,8 +94,8 @@ class TestGetResponseHandling(unittest.TestCase):
             (get_resp, fci + bytes.fromhex('9000')),
         ])
         out = ccid.transmit_iso7816(xfr, select)
-        self.assertEqual(out, fci + bytes.fromhex('9000'))
-        self.assertEqual(sent[1], get_resp)      # issued the right GET RESPONSE
+        assert out == fci + bytes.fromhex('9000')
+        assert sent[1] == get_resp
 
     def test_chained_61xx(self):
         cmd = bytes.fromhex('00B0000000')
@@ -105,7 +105,7 @@ class TestGetResponseHandling(unittest.TestCase):
             (bytes.fromhex('00C0000001'), bytes.fromhex('CC') + bytes.fromhex('9000')),
         ])
         out = ccid.transmit_iso7816(xfr, cmd)
-        self.assertEqual(out, bytes.fromhex('AABBBBBBCC9000'))
+        assert out == bytes.fromhex('AABBBBBBCC9000')
 
     def test_6cxx_resends_with_corrected_le(self):
         cmd = bytes.fromhex('00B0000000')
@@ -114,7 +114,7 @@ class TestGetResponseHandling(unittest.TestCase):
             (bytes.fromhex('00B0000008'), bytes.fromhex('0102030405060708') + bytes.fromhex('9000')),
         ])
         out = ccid.transmit_iso7816(xfr, cmd)
-        self.assertEqual(out, bytes.fromhex('01020304050607089000'))
+        assert out == bytes.fromhex('01020304050607089000')
 
 
 def _frame(payload=b'', status=0x00, error=0x00):
@@ -175,28 +175,36 @@ class TestPowerOnMuteRetry(unittest.TestCase):
         atr = _frame(payload=bytes.fromhex('3B7F'))
         usb = self._usb([_MUTE, _MUTE, atr])          # mute twice, then the ATR
         got = usb.power_on(mute_retries=2, mute_pause=0)
-        self.assertEqual(got, bytes.fromhex('3B7F'))
-        self.assertEqual(len(usb._t.writes), 3)        # it really re-powered
+        assert got == bytes.fromhex('3B7F')
+        assert len(usb._t.writes) == 3
 
     def test_power_on_gives_up_after_the_bounded_retries(self):
         usb = self._usb([_MUTE, _MUTE, _MUTE])
-        with self.assertRaises(ccid.CcidMute):
+        _raised = False
+        try:
             usb.power_on(mute_retries=2, mute_pause=0)
-        self.assertEqual(len(usb._t.writes), 3)        # 1 + 2 retries, no more
+        except ccid.CcidMute:
+            _raised = True
+        assert _raised, 'ccid.CcidMute not raised'
+        assert len(usb._t.writes) == 3
 
     def test_power_on_does_not_retry_when_the_card_answers(self):
         atr = _frame(payload=bytes.fromhex('3B7F'))
         usb = self._usb([atr])
-        self.assertEqual(usb.power_on(mute_retries=2, mute_pause=0), bytes.fromhex('3B7F'))
-        self.assertEqual(len(usb._t.writes), 1)        # answered first time
+        assert usb.power_on(mute_retries=2, mute_pause=0) == bytes.fromhex('3B7F')
+        assert len(usb._t.writes) == 1
 
     def test_xfr_never_retries_on_mute(self):
         ''' A command APDU is not idempotent: mute surfaces, it is not re-sent. '''
 
         usb = self._usb([_MUTE])
-        with self.assertRaises(ccid.CcidMute):
+        _raised = False
+        try:
             usb.xfr(bytes.fromhex('00A40000023F00'))
-        self.assertEqual(len(usb._t.writes), 1)        # sent once, never again
+        except ccid.CcidMute:
+            _raised = True
+        assert _raised, 'ccid.CcidMute not raised'
+        assert len(usb._t.writes) == 1
 
 
 class TestFindReadersIsImportSafe(unittest.TestCase):
@@ -204,7 +212,7 @@ class TestFindReadersIsImportSafe(unittest.TestCase):
     def test_returns_list_and_never_raises(self):
         # On CI (no reader / no sysfs) this is []; with a reader it's populated.
         # Either way it must be a list and must not raise.
-        self.assertIsInstance(ccid.find_ccid_readers(), list)
+        assert isinstance(ccid.find_ccid_readers(), list)
 
 
 if __name__ == '__main__':

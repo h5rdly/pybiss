@@ -70,15 +70,15 @@ class TestMiniServer(unittest.IsolatedAsyncioTestCase):
         
         # Valid JSON
         req = Request('POST', '/', {}, b'{"key": "value"}')
-        self.assertEqual(req.json, {'key': 'value'})
+        assert req.json == {'key': 'value'}
 
         # Invalid JSON gracefully degrades
         req_bad = Request('POST', '/', {}, b'NOT_JSON')
-        self.assertEqual(req_bad.json, {})
+        assert req_bad.json == {}
 
         # Empty body gracefully degrades
         req_empty = Request('POST', '/', {}, b'')
-        self.assertEqual(req_empty.json, {})
+        assert req_empty.json == {}
 
 
     async def test_get_route_sync(self):
@@ -96,9 +96,9 @@ class TestMiniServer(unittest.IsolatedAsyncioTestCase):
         
         await app.handle_client(reader, writer)
         
-        self.assertTrue(writer.is_closed)
-        self.assertIn(b'200 OK', writer.output)
-        self.assertIn(b'{"status": "ok"}', writer.output)
+        assert writer.is_closed
+        assert b'200 OK' in writer.output
+        assert b'{"status": "ok"}' in writer.output
 
 
     async def test_post_route_async(self):
@@ -126,8 +126,27 @@ class TestMiniServer(unittest.IsolatedAsyncioTestCase):
         
         await app.handle_client(reader, writer)
         
-        self.assertIn(b'200 OK', writer.output)
-        self.assertIn(b'{"echo": "hello"}', writer.output)
+        assert b'200 OK' in writer.output
+        assert b'{"echo": "hello"}' in writer.output
+
+
+    async def test_route_ignores_query_string(self):
+        """ Portals probe with a cache-buster (GET /version?_=<ts>) - must route """
+
+        app = MiniServer()
+        CORS(app)
+
+        @app.get('/version')
+        def version(req):
+            return {'version': '3.46'}
+
+        reader = MockReader(b'GET /version?_=1784914461508 HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n')
+        writer = MockWriter()
+
+        await app.handle_client(reader, writer)
+
+        assert b'200 OK' in writer.output
+        assert b'"3.46"' in writer.output
 
 
     async def test_404_not_found(self):
@@ -141,8 +160,8 @@ class TestMiniServer(unittest.IsolatedAsyncioTestCase):
         
         await app.handle_client(reader, writer)
         
-        self.assertIn(b'404 Not Found', writer.output)
-        self.assertIn(b'{"error": "Not Found"}', writer.output)
+        assert b'404 Not Found' in writer.output
+        assert b'{"error": "Not Found"}' in writer.output
 
 
     async def test_500_internal_error_handling(self):
@@ -160,8 +179,8 @@ class TestMiniServer(unittest.IsolatedAsyncioTestCase):
         
         await app.handle_client(reader, writer)
         
-        self.assertIn(b'500 Internal Server Error', writer.output)
-        self.assertIn(b'Deliberate crash for testing', writer.output)
+        assert b'500 Internal Server Error' in writer.output
+        assert b'Deliberate crash for testing' in writer.output
 
 
     async def test_cors_preflight_and_pna(self):
@@ -186,13 +205,13 @@ class TestMiniServer(unittest.IsolatedAsyncioTestCase):
         await app.handle_client(reader, writer)
         
         # Must return 204 No Content for Preflight
-        self.assertIn(b'204 No Content', writer.output)
+        assert b'204 No Content' in writer.output
         
         # Must reflect the specific Origin, not '*'
-        self.assertIn(b'Access-Control-Allow-Origin: https://bank.borica.bg', writer.output)
+        assert b'Access-Control-Allow-Origin: https://bank.borica.bg' in writer.output
         
         # MUST include the PNA bypass header
-        self.assertIn(b'Access-Control-Allow-Private-Network: true', writer.output)
+        assert b'Access-Control-Allow-Private-Network: true' in writer.output
 
     async def test_cors_open_origin_matches_daemon(self):
         ''' Default (no credentials): sends literal '*' like the official daemon, not a reflection '''
@@ -211,9 +230,9 @@ class TestMiniServer(unittest.IsolatedAsyncioTestCase):
 
         await app.handle_client(reader, writer)
 
-        self.assertIn(b'Access-Control-Allow-Origin: *', writer.output)
-        self.assertNotIn(b'Access-Control-Allow-Credentials', writer.output)
-        self.assertNotIn(b'random-site.com', writer.output)
+        assert b'Access-Control-Allow-Origin: *' in writer.output
+        assert b'Access-Control-Allow-Credentials' not in writer.output
+        assert b'random-site.com' not in writer.output
 
     async def test_cors_credentialed_mode_reflects_origin(self):
         ''' Opt-in credentialed mode reflects the Origin (since '*' is forbidden with credentials) '''
@@ -232,8 +251,8 @@ class TestMiniServer(unittest.IsolatedAsyncioTestCase):
 
         await app.handle_client(reader, writer)
 
-        self.assertIn(b'Access-Control-Allow-Origin: https://random-site.com', writer.output)
-        self.assertIn(b'Access-Control-Allow-Credentials: true', writer.output)
+        assert b'Access-Control-Allow-Origin: https://random-site.com' in writer.output
+        assert b'Access-Control-Allow-Credentials: true' in writer.output
 
 
 if __name__ == '__main__':

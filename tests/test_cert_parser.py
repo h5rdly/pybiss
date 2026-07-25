@@ -132,24 +132,24 @@ class TestPemToDer(unittest.TestCase):
 
     def test_single_pem_certificate(self):
         der = base64.b64decode(REAL_CERT_B64)
-        self.assertEqual(pem_to_der(self._pem(der)), [der])
+        assert pem_to_der(self._pem(der)) == [der]
 
     def test_multi_certificate_bundle_keeps_every_cert(self):
         ''' A root+intermediate bundle must not silently lose certificates '''
 
         der = base64.b64decode(REAL_CERT_B64)
         bundle = self._pem(der) + b'# comment between blocks\n' + self._pem(der)
-        self.assertEqual(pem_to_der(bundle), [der, der])
+        assert pem_to_der(bundle) == [der, der]
 
     def test_raw_der_passes_through(self):
         der = base64.b64decode(REAL_CERT_B64)
-        self.assertEqual(pem_to_der(der), [der])
+        assert pem_to_der(der) == [der]
 
     def test_garbage_block_skipped(self):
         der = base64.b64decode(REAL_CERT_B64)
         bundle = (b'-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----\n'
                   + self._pem(der))
-        self.assertEqual(pem_to_der(bundle), [der])
+        assert pem_to_der(bundle) == [der]
 
 
 if __name__ == '__main__':

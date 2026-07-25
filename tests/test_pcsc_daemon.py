@@ -39,7 +39,7 @@ class TestLiveDaemonHandshake(unittest.TestCase):
         # merely-absent daemon).
         hcontext = sc_ffi.establish_context()
         try:
-            self.assertIsNotNone(hcontext)
+            assert hcontext is not None
         finally:
             sc_ffi.release_context(hcontext)
 
@@ -48,7 +48,7 @@ class TestLiveDaemonHandshake(unittest.TestCase):
         # two-pass buffer-sizing call completes and hands back a list.
         hcontext = sc_ffi.establish_context()
         try:
-            self.assertIsInstance(sc_ffi.list_readers(hcontext), list)
+            assert isinstance(sc_ffi.list_readers(hcontext), list)
         finally:
             sc_ffi.release_context(hcontext)
 
