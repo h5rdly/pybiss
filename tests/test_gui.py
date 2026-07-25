@@ -779,33 +779,51 @@ class TestModalRenderer(TkTestCase):
         from src.dashboard import ModalRenderer
         return ModalRenderer(self.root)
 
-    def _drive(self, action, delay=150):
-        ''' Schedule `action(dialog)` against the modal once it exists '''
+    def _dialog(self):
+        dialogs = [w for w in self.root.winfo_children()
+                   if isinstance(w, tk.Toplevel) and w.winfo_exists()]
+        return dialogs[-1] if dialogs else None
 
-        def run():
-            dialogs = [w for w in self.root.winfo_children()
-                       if isinstance(w, tk.Toplevel) and w.winfo_exists()]
-            if not dialogs:             # dialog not built yet - retry shortly
-                self._after_ids.append(self.root.after(50, run))
+    def _drive(self, action, delay=150):
+        ''' Drive the modal once it is viewable '''
+
+        def run(tries=0):
+            dialog = self._dialog()
+            if dialog is None or not dialog.winfo_viewable():
+                if tries < 80:          # not built, or mapped+grabbed yet
+                    self._after_ids.append(self.root.after(50, lambda: run(tries + 1)))
                 return
+            dialog.focus_force()
             try:
-                action(dialogs[-1])
+                action(dialog)
             except Exception as exc:
-                # Tk swallows exceptions raised inside an after() callback: it
-                # prints them and carries on, so the dialog is never dismissed
-                # and wait_window() blocks the whole suite forever. Capture the
-                # error and close the dialog so the test *fails* instead.
+                # Tk swallows exceptions raised inside an after() callback, so a
+                # never-dismissed dialog would block wait_window() forever.
+                # Capture the error and close it so the test *fails* instead.
                 self._drive_error = exc
-                dialogs[-1].destroy()
+                dialog.destroy()
+                return
+            self._after_ids.append(self.root.after(100, lambda: self._ensure_dismissed(0)))
 
         self._after_ids.append(self.root.after(delay, run))
 
+    def _ensure_dismissed(self, tries):
+        ''' Safety net: never let a stuck modal hang the suite - fail cleanly '''
+
+        dialog = self._dialog()
+        if dialog is None:
+            return                      # dismissed as intended
+        if tries < 40:                  # ~4s grace for the interaction to take
+            self._after_ids.append(self.root.after(100, lambda: self._ensure_dismissed(tries + 1)))
+            return
+        self._drive_error = self._drive_error or AssertionError(
+            'modal did not dismiss - the interaction event was not honoured')
+        dialog.grab_release()
+        dialog.destroy()
+
     def test_prompt_pin_returns_entered_pin(self):
         def type_and_submit(dlg):
-            # Drive the composite Entry, not the raw tk.Entry: the PIN field
-            # carries a placeholder, and while it is active get() reports ''.
-            # Inserting into the inner widget alone would return '' and pass
-            # only by accident of focus timing.
+            # Drive the composite Entry, not the raw tk.Entry
             field = find_by_attr(dlg, '_clear_placeholder')[0]
             field._clear_placeholder()
             field.entry.insert(0, '4321')
