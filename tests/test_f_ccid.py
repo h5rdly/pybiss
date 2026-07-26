@@ -186,7 +186,7 @@ class TestLiveGadgetViaPcsc(unittest.TestCase):
     '''
     The whole stack for real: app -> sc_ffi (ctypes) -> libpcsclite -> pcscd ->
     libccid -> USB -> dummy_hcd -> f_ccid -> synthetic card. No mocks, no seam
-    override - app._open_card opens a genuine PC/SC connection.
+    override - card_access._open_card opens a genuine PC/SC connection.
     '''
 
     class _UI:

@@ -1,6 +1,6 @@
 import base64, functools, hashlib, os, sys
 
-from . import detector, hardware, service, jws, transport, backends
+from . import detector, hardware, service, jws, transport, backends, card_service, card_access
 from .cards import BTrustDriver
 from .cert_parser import pem_to_der
 from .config import config
@@ -95,11 +95,8 @@ def set_pin(req, payload):
     if not old_pin or not new_pin:
         return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PIN entry canceled'}
 
-    lib_path = detector.auto_detect_library()
     try:
-        funcs = hardware.load_pkcs11(lib_path)
-        slots = hardware.get_slots(funcs, token_present=True)
-        hardware.change_card_pin(funcs, slots[0], old_pin, new_pin)
+        card_service.change_pin(old_pin, new_pin)
         return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': 'PIN successfully changed'}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
@@ -115,11 +112,8 @@ def set_puk(req, payload):
     if not old_puk or not new_puk:
         return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PUK entry canceled'}
 
-    lib_path = detector.auto_detect_library()
     try:
-        funcs = hardware.load_pkcs11(lib_path)
-        slots = hardware.get_slots(funcs, token_present=True)
-        hardware.change_card_puk(funcs, slots[0], old_puk, new_puk)
+        card_service.change_puk(old_puk, new_puk)
         return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': 'PUK successfully changed'}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
@@ -135,11 +129,8 @@ def unblock_pin(req, payload):
     if not puk or not new_pin:
         return {'status': 'error', 'reasonCode': 401, 'reasonText': 'PUK entry canceled'}
 
-    lib_path = detector.auto_detect_library()
     try:
-        funcs = hardware.load_pkcs11(lib_path)
-        slots = hardware.get_slots(funcs, token_present=True)
-        hardware.unblock_card_pin(funcs, slots[0], puk, new_pin)
+        card_service.unblock_pin(puk, new_pin)
         return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': 'PIN successfully unblocked'}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 403, 'reasonText': str(e)}
@@ -188,7 +179,7 @@ def gen_spkac(req, payload):
         return {'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
 
     try:
-        funcs = _load_pkcs11()
+        funcs = card_access._load_pkcs11()
     except backends.BackendUnavailable:
         return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.no-card-found')}
 
@@ -240,11 +231,8 @@ def write_cert_sc(req, payload):
     if not pin:
         return {'confirm': None, 'status': 'error', 'reasonCode': 401, 'reasonText': reason('error.user-canceled')}
 
-    lib_path = detector.auto_detect_library()
     try:
-        funcs = hardware.load_pkcs11(lib_path)
-        slots = hardware.get_slots(funcs, token_present=True)
-        hardware.write_certificate(funcs, slots[0], pin, cert_der)
+        card_service.import_certificate(cert_der, pin)
         return {'confirm': '0', 'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success')}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
@@ -255,17 +243,8 @@ def write_cert_sc(req, payload):
 def get_info(req, payload):
     ''' Full token spec sheet, in the daemon's flat response shape '''
 
-    lib_path = detector.auto_detect_library()
-    if not lib_path:
-        return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.no-card-found')}
-
     try:
-        funcs = hardware.load_pkcs11(lib_path)
-        slots = hardware.get_slots(funcs, token_present=True)
-        if not slots:
-            return {'status': 'error', 'reasonCode': 404, 'reasonText': reason('error.token-not-found')}
-
-        info = hardware.get_token_info_extended(funcs, slots[0])
+        info = card_service.token_info()
         provider = next((p for p in map(detector.identify_provider, detector.get_connected_atrs()) if p), '')
         # Flatten to the official C0030ai field names
         return {
@@ -281,6 +260,8 @@ def get_info(req, payload):
             'cardData': [],
             'status': 'ok', 'reasonCode': 200, 'reasonText': reason('response.success'),
         }
+    except backends.BackendUnavailable:
+        return {'status': 'error', 'reasonCode': 404, 'reasonText': reason('error.token-not-found')}
     except Exception as e:
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
 
@@ -405,16 +386,6 @@ def del_cert(req, payload):
         return {'status': 'error', 'reasonCode': 500, 'reasonText': str(e)}
 
 
-def _detected_atr() -> str:
-    ''' First connected card ATR (upper hex), or '' - used to pick a backend '''
-
-    try:
-        atrs = detector.get_connected_atrs(ccid_fallback=True)
-        return atrs[0].upper() if atrs else ''
-    except Exception:
-        return ''
-
-
 def _aia_resolver():
     ''' Fetches missing issuer certs over AIA, caching into the user config dir. '''
 
@@ -449,17 +420,8 @@ def _getsigner_cng(selector, show_valid_certs, ui_provider):
             mscapi.free_windows_certificate(c['windows_ctx'])
 
 
-def _load_pkcs11():
-    ''' Test seam: resolve the vendor library and return its PKCS#11 function table '''
-
-    lib_path = detector.auto_detect_library()
-    if not lib_path:
-        raise backends.BackendUnavailable('No PKCS#11 library for the detected card')
-    return hardware.load_pkcs11(lib_path)
-
-
 def _getsigner_pkcs11(selector, show_valid_certs, ui_provider):
-    funcs = _load_pkcs11()
+    funcs = card_access._load_pkcs11()
     slots = hardware.get_slots(funcs, token_present=True)
     if not slots:
         raise backends.BackendUnavailable('No token present')
@@ -482,59 +444,13 @@ def _getsigner_pkcs11(selector, show_valid_certs, ui_provider):
     return _select_and_build_chain(filtered, [c['der'] for c in all_certs], ui_provider)
 
 
-def _pcsc_factory():
-    from .sc_ffi import SmartCardConnection
-    return SmartCardConnection()
-
-
-def _ccid_factory():
-    from .ccid import CcidConnection
-    return CcidConnection()
-
-
-class CardUnreachable(Exception):
-    ''' Neither PC/SC nor direct CCID could reach a card; carries both reasons '''
-
-    def __init__(self, pcsc_error, ccid_error):
-        self.pcsc_error, self.ccid_error = pcsc_error, ccid_error
-        super().__init__(f'PC/SC: {pcsc_error} | direct CCID: {ccid_error}')
-
-
-class _CardConnection:
-    ''' Open the card over PC/SC, falling back to direct USB CCID '''
-
-    def __init__(self, pcsc_factory=_pcsc_factory, ccid_factory=_ccid_factory):
-        self._pcsc_factory, self._ccid_factory = pcsc_factory, ccid_factory
-        self._inner = None
-
-    def __enter__(self):
-        try:
-            inner = self._pcsc_factory()
-            conn = inner.__enter__()
-        except Exception as pcsc_error:
-            try:
-                inner = self._ccid_factory()
-                conn = inner.__enter__()
-            except Exception as ccid_error:
-                raise CardUnreachable(pcsc_error, ccid_error) from ccid_error
-        self._inner = inner
-        return conn
-
-    def __exit__(self, *exc):
-        return self._inner.__exit__(*exc) if self._inner is not None else False
-
-
-def _open_card():
-    return _CardConnection()
-
-
 def _getsigner_apdu(selector, show_valid_certs, ui_provider):
     ''' Read-only certificate discovery over raw APDU (no PIN, safe) '''
 
     from .cards import BTrustDriver
 
     try:
-        conn_cm = _open_card()
+        conn_cm = card_access._open_card()
         conn = conn_cm.__enter__()
     except Exception as e:
         raise backends.BackendUnavailable(f'No card reachable over PC/SC or direct CCID: {e}')
@@ -559,7 +475,7 @@ def get_signer(req):
     show_valid_certs = data.get('showValidCerts', True)
     ui_provider = get_ui_provider()
 
-    order = backends.resolve(backends.OP_READ, atr=_detected_atr(), config=config)
+    order = backends.resolve(backends.OP_READ, atr=card_access._detected_atr(), config=config)
     for name in order:
         try:
             return _GETSIGNER[name](selector, show_valid_certs, ui_provider)
@@ -640,7 +556,7 @@ def sign(req):
          return {'signatures': [], 'status': 'error', 'reasonCode': 400, 'reasonText': 'Invalid signer certificate encoding'}
 
     # Route to a signing backend per the resolver, falling through on unavailability
-    order = backends.resolve(backends.OP_SIGN, atr=_detected_atr(), config=config)
+    order = backends.resolve(backends.OP_SIGN, atr=card_access._detected_atr(), config=config)
     for name in order:
         try:
             return _SIGN[name](contents, hash_algorithm, signer_cert_der, ui_provider)
@@ -678,7 +594,7 @@ def _sign_cng(contents, hash_algorithm, signer_cert_der, ui_provider):
 
 def _sign_pkcs11(contents, hash_algorithm, signer_cert_der, ui_provider):
     try:
-        funcs = _load_pkcs11()
+        funcs = card_access._load_pkcs11()
     except backends.BackendUnavailable:
         raise
     except Exception as e:
@@ -732,7 +648,7 @@ def _sign_apdu(contents, hash_algorithm, signer_cert_der, ui_provider):
     hash_name, algo_ref = _APDU_HASH[algo]
 
     try:
-        conn_cm = _open_card()
+        conn_cm = card_access._open_card()
         conn = conn_cm.__enter__()
     except Exception as e:
         raise backends.BackendUnavailable(f'No card reachable over PC/SC or direct CCID: {e}')

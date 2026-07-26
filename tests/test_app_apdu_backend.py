@@ -2,7 +2,7 @@ import base64, hashlib, sys, unittest
 
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
-from src import app
+from src import app, card_access
 from x509_helpers import build_cert, TEST_N, TEST_E
 from synthetic_card import synthetic_idprime_card
 
@@ -24,11 +24,11 @@ class _FakeUI:
 class TestApduBackendsNoMocks(unittest.TestCase):
 
     def setUp(self):
-        self._orig_open = app._open_card
-        app._open_card = lambda: _make_card()
+        self._orig_open = card_access._open_card
+        card_access._open_card = lambda: _make_card()
 
     def tearDown(self):
-        app._open_card = self._orig_open
+        card_access._open_card = self._orig_open
 
     def test_getsigner_apdu_discovers_the_cert(self):
         result = app._getsigner_apdu(selector=None, show_valid_certs=False,
@@ -73,7 +73,7 @@ class TestApduBackendReplayRoundtrip(unittest.TestCase):
 
         payload_b64 = base64.b64encode(b'record then replay').decode()
 
-        orig = app._open_card
+        orig = card_access._open_card
         # 1) record: wrap the synthetic card in a tracer
         tracer_box = {}
 
@@ -86,16 +86,16 @@ class TestApduBackendReplayRoundtrip(unittest.TestCase):
             def __exit__(self, *e): return False
 
         try:
-            app._open_card = lambda: RecordingCM()
+            card_access._open_card = lambda: RecordingCM()
             r1 = app._sign_apdu([payload_b64], 'SHA256', TEST_DER, _FakeUI(pin='1234'))
             assert r1['status'] == 'ok'
             trace = tracer_box['t'].to_dict()
 
             # 2) replay: same trace, no synthetic card, via ReplayConnection
-            app._open_card = lambda: ReplayConnection.from_dict(trace)
+            card_access._open_card = lambda: ReplayConnection.from_dict(trace)
             r2 = app._sign_apdu([payload_b64], 'SHA256', TEST_DER, _FakeUI(pin='1234'))
         finally:
-            app._open_card = orig
+            card_access._open_card = orig
 
         assert r2['status'] == 'ok'
         assert r1['signatures'] == r2['signatures']

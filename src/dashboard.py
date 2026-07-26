@@ -1,7 +1,7 @@
 import os, sys, logging, subprocess, tkinter as tk, base64, threading, queue
 from tkinter import filedialog, font as tkfont
 
-from . import detector, hardware, transport
+from . import detector, hardware, transport, card_service
 from .app import CERTS_DIR
 from .config import config
 from .i18n import _
@@ -463,17 +463,6 @@ class DesktopDashboard(Window):
             self.diag('    Drop it in tests/fixtures/ for hardware-free replay tests.')
 
 
-    def _load_card(self):
-        ''' Loads the PKCS#11 library and returns (funcs, first_slot_id) '''
-
-        lib_path = config.get('pkcs11Path') or hardware.LIBCVP11_PATH
-        funcs = hardware.load_pkcs11(lib_path)
-        slots = hardware.get_slots(funcs, token_present=True)
-        if not slots:
-            raise Exception('No token present in the reader')
-        return funcs, slots[0]
-
-
     def _ui_change_pin(self):
 
         # ModalRenderer runs on the Tk main thread; get_ui_provider()'s proxy
@@ -484,8 +473,7 @@ class DesktopDashboard(Window):
         if not new_pin: return
 
         try:
-            funcs, slot = self._load_card()
-            hardware.change_card_pin(funcs, slot_id=slot, old_pin=old_pin, new_pin=new_pin)
+            card_service.change_pin(old_pin, new_pin)
             MessageBox.showinfo("Success", "PIN successfully changed.")
         except Exception as e:
             MessageBox.showinfo("Error", f"Failed to change PIN: {e}")
@@ -499,8 +487,7 @@ class DesktopDashboard(Window):
         if not new_pin: return
 
         try:
-            funcs, slot = self._load_card()
-            hardware.unblock_card_pin(funcs, slot_id=slot, puk=puk, new_pin=new_pin)
+            card_service.unblock_pin(puk, new_pin)
             MessageBox.showinfo("Success", "Card unblocked successfully.")
         except Exception as e:
             MessageBox.showinfo("Error", f"Failed to unblock card: {e}")
@@ -527,8 +514,7 @@ class DesktopDashboard(Window):
                 from .cert_parser import pem_to_der
                 cert_data = pem_to_der(cert_data)[0]
 
-            funcs, slot = self._load_card()
-            hardware.write_certificate(funcs, slot_id=slot, pin=pin, cert_der=cert_data)
+            card_service.import_certificate(cert_data, pin)
             MessageBox.showinfo("Success", "Certificate imported to smart card.")
         except Exception as e:
             MessageBox.showinfo("Error", f"Import failed: {e}")
@@ -945,8 +931,7 @@ class DesktopDashboard(Window):
             self.log_to_dashboard(f'    - {r}')
             
         try:
-            funcs, slot = self._load_card()
-            serial = hardware.get_token_serial_number(funcs, slot_id=slot)
+            serial = card_service.token_info().get('serial', 'n/a')
             self.log_to_dashboard(f'[+] Card Serial Number: {serial}')
             self.status_var.set(_('status_connected'))
         except Exception as e:
@@ -965,8 +950,7 @@ class DesktopDashboard(Window):
             return
 
         try:
-            funcs, slot = self._load_card()
-            certs = hardware.get_certificates(funcs, slot_id=slot, pin=pin)
+            certs = card_service.read_certificates(pin)
             if not certs:
                 self.log_to_dashboard('[-] No certificates found on card.')
                 return

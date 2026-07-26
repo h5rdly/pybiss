@@ -61,7 +61,7 @@ class SyntheticIDPrimeCard:
     '''
     Serves the IDPrime MiniDriver structure for one certificate and signs for
     real with its key. Doubles as its own context manager + card lock, so it is
-    a drop-in for SmartCardConnection (app._open_card can return it directly).
+    a drop-in for SmartCardConnection (card_access._open_card can return it directly).
     '''
 
     def __init__(self, cert_der: bytes, *, key=(TEST_N, TEST_E, TEST_D),

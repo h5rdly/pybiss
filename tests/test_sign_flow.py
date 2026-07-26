@@ -10,7 +10,7 @@ from unittest.mock import patch
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
 from src.app import app
-from src import app as app_mod
+from src import card_access
 from src.sc_apdu import pad_pkcs1_v15_sha256
 from src.ui_bridge import set_ui_provider
 
@@ -74,18 +74,18 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         self.token = self.loader.token
         self.token.mock_certs = [{'handle': 777, 'id': b'\x01', 'der': self.signer_der}]
 
-        self._orig_load = app_mod._load_pkcs11
-        app_mod._load_pkcs11 = lambda: hardware.load_pkcs11('mock-lib', loader=self.loader)
+        self._orig_load = card_access._load_pkcs11
+        card_access._load_pkcs11 = lambda: hardware.load_pkcs11('mock-lib', loader=self.loader)
 
         # Neutralise ambient ATR detection so backend selection is deterministic
         # and never touches the real reader (matches a CI box with no card)
-        self._orig_detected = app_mod._detected_atr
-        app_mod._detected_atr = lambda: ''
+        self._orig_detected = card_access._detected_atr
+        card_access._detected_atr = lambda: ''
 
     def tearDown(self):
         set_ui_provider(None)
-        app_mod._load_pkcs11 = self._orig_load
-        app_mod._detected_atr = self._orig_detected
+        card_access._load_pkcs11 = self._orig_load
+        card_access._detected_atr = self._orig_detected
 
     async def test_sign_happy_path(self):
         ''' Valid portal request -> verified, confirmed, signed, BISS envelope out '''
@@ -121,7 +121,7 @@ class TestSignFlow(unittest.IsolatedAsyncioTestCase):
         def apdu_unavailable(*a, **k):
             raise backends_mod.BackendUnavailable('no APDU card reachable')
 
-        app_mod._detected_atr = lambda: atr        # this card IS detected + whitelisted
+        card_access._detected_atr = lambda: atr        # this card IS detected + whitelisted
         try:
             with patch('src.app.sys.platform', 'linux'), \
                  patch.dict('src.app._SIGN', {'apdu': apdu_unavailable}):

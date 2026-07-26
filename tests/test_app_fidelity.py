@@ -10,6 +10,7 @@ from unittest.mock import patch
 sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 
 from src.app import app
+from src import card_access
 from src.server import Request
 from src.ui_bridge import set_ui_provider
 from src import i18n as biss_locale
@@ -187,17 +188,15 @@ class TestGenSpkacEndpoint(unittest.TestCase):
         # No hardware mock spies: inject a fake PKCS#11 table via the seam, so
         # the real hardware.generate_spkac runs against the fake token.
         from mocks import MockLoader
-        import src.app as app_mod
         import src.hardware as hardware
         self.loader = MockLoader('mock-lib')
         self.token = self.loader.token
-        self._app_mod = app_mod
-        self._orig_load = app_mod._load_pkcs11
-        app_mod._load_pkcs11 = lambda: hardware.load_pkcs11('mock-lib', loader=self.loader)
+        self._orig_load = card_access._load_pkcs11
+        card_access._load_pkcs11 = lambda: hardware.load_pkcs11('mock-lib', loader=self.loader)
 
     def tearDown(self):
         set_ui_provider(None)
-        self._app_mod._load_pkcs11 = self._orig_load
+        card_access._load_pkcs11 = self._orig_load
 
     def _valid_jws(self, key_size=2048):
         cert = build_cert(aki=self.ADMIN_CERT_AKI,
