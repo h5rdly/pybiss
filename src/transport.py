@@ -401,12 +401,16 @@ def install_browser_trust(cert_path: str) -> tuple:
             return False, f'Keychain trust failed: {e}'
 
     if sys.platform == 'win32':
-        try:
-            subprocess.run(['certutil', '-addstore', '-user', 'Root', cert_path],
-                           check=True, capture_output=True)
-            return True, 'Trusted in the Windows per-user Root store.'
-        except Exception as e:
-            return False, f'Windows trust failed: {e}'
+        proc = subprocess.run(['certutil', '-addstore', '-f', 'Root', cert_path],
+                              capture_output=True)
+        if proc.returncode == 0:
+            return True, 'Trusted in the Windows machine Root store.'
+        detail = proc.stderr.decode(errors='replace').strip() or \
+                 proc.stdout.decode(errors='replace').strip()
+        if b'0x80070005' in proc.stdout or 'denied' in detail.lower():
+            return False, ('Windows trust needs administrator rights - run PyBISS '
+                           'as administrator and click Trust again.')
+        return False, f'Windows trust failed: {detail[:200]}'
 
     # Linux / BSD - the NSS stores browsers keep per-user.
     if not shutil.which('certutil'):
