@@ -1,5 +1,5 @@
 import os, sys, logging, subprocess, tkinter as tk, base64, threading, queue
-from tkinter import filedialog, font as tkfont
+from tkinter import font as tkfont
 
 from . import detector, hardware, transport, card_service
 from .app import CERTS_DIR
@@ -9,7 +9,7 @@ from .app import app as api_server
 
 from .tkinter_mods import (
     Theme, Window, Button, Frame, Scrollbar, MessageBox, Toggle, Label,
-    set_dark_titlebar, Toplevel, Textbox, Listbox, Entry, Font
+    set_dark_titlebar, Toplevel, Textbox, Listbox, Entry, Font, FileDialog
 )
 from .ui_bridge import ui_task_queue, set_gui_active
 
@@ -446,7 +446,7 @@ class DesktopDashboard(Window):
             self.diag('[-] Run diagnostics first.')
             return
 
-        target = filedialog.askdirectory(title='Save diagnostics into...')
+        target = FileDialog.ask_directory(self, title='Save diagnostics into...')
         if not target:
             return
 
@@ -495,10 +495,10 @@ class DesktopDashboard(Window):
 
     def _ui_import_cert(self):
         
-        # Native OS File Dialog
-        filepath = filedialog.askopenfilename(
-            title="Select Certificate", 
-            filetypes=(("DER Certificates", "*.cer *.der *.crt"), ("All Files", "*.*"))
+        filepath = FileDialog.ask_open(
+            self,
+            title="Select Certificate",
+            filetypes=(("DER Certificates", ("*.cer", "*.der", "*.crt")), ("All files", ("*",)))
         )
         if not filepath: return
         

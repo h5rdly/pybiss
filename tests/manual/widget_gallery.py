@@ -16,7 +16,7 @@ sys.path.insert(0, __file__.replace('\\', '/').rsplit('/', 3)[0])
 
 from src.tkinter_mods import (
     Window, Label, Button, Entry, Checkbox, Toggle,
-    Textbox, Listbox, Toplevel, MessageBox, Theme,
+    Textbox, Listbox, ListView, FileDialog, Toplevel, MessageBox, Theme,
 )
 
 
@@ -25,6 +25,27 @@ def build():
 
     Label(win, text='Widget Gallery', font=('Segoe UI', 16, 'bold')).pack(pady=(16, 4))
     Label(win, text='drag me across monitors to test per-monitor DPI').pack(pady=(0, 12))
+
+    # ListView
+    lv = ListView(win, columns=[('name', 'Name', 0, 'w', {'required': True}), ('size', 'Size', 9, 'e'),
+                                ('progress', 'Progress', 12, 'w', 'progress'), ('rate', 'Down', 10, 'e')],
+                  width=520, height=180, command=lambda sel: print('selected', [r['id'] for r in sel]),
+                  columns_command=lambda state: print('columns', state))
+    lv.set_rows([{'id': i, 'name': f'debian-13.{i}-amd64-netinst.iso', 'size': f'{600 + i % 400} MB',
+                  '_sort': {'size': 600 + i % 400}, 'progress': (i * 7 % 101) / 100, 'rate': f'{i % 900} KiB/s'}
+                 for i in range(5000)])
+    lv.bind('<<ListboxActivate>>', lambda e: print('activate', lv.get()))
+    lv.bind('<Button-3>', lambda e: print('right-click on row', lv.nearest(e.y)))
+    lv.pack(pady=(0, 12))
+
+    # FileDialog
+    Button(win, text='Open file…',
+           command=lambda: print('open ->', FileDialog.ask_open(win, filetypes=[('Torrents', '*.torrent'), ('All files', '*')],
+                                                                 multiple=True))).pack(pady=4)
+    Button(win, text='Save as…',
+           command=lambda: print('save ->', FileDialog.ask_save(win, initialfile='new.torrent'))).pack(pady=4)
+    Button(win, text='Choose folder…',
+           command=lambda: print('directory ->', FileDialog.ask_directory(win))).pack(pady=4)
 
     # Buttons 
     row = Button(win, text='Info dialog',

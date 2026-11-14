@@ -189,7 +189,7 @@ def _find_usbfs() -> list[dict]:
             info['vid'] = _read_text(dev / 'idVendor') or '????'
             info['pid'] = _read_text(dev / 'idProduct') or '????'
             info['backend'] = 'usbfs'
-        except (OSError, ValueError):
+        except OSError, ValueError:
             continue
         out.append(info)
     return out

@@ -80,7 +80,7 @@ class TestOverARealSocket(unittest.TestCase):
     def _serve(self, card, sock):
         try:
             vpcd_card.serve_connection(card, sock, log=None)
-        except (vpcd_card.Disconnected, OSError):
+        except vpcd_card.Disconnected, OSError:
             pass
 
     def tearDown(self):

@@ -38,6 +38,7 @@ if _TK_IMPORTABLE and not os.environ.get('PYBISS_SKIP_GUI_TESTS'):
     try:
         _SHARED_ROOT = Window(title='pybiss-tests')
         _SHARED_ROOT.withdraw()
+        _SHARED_ROOT._dpi_scale = 1.0
 
         def _destroy_shared_root():
             try:

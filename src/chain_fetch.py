@@ -28,7 +28,7 @@ def ca_issuer_urls(cert_der: bytes) -> list[str]:
             tag, location = ad.read_tlv()           # accessLocation GeneralName
             if method == _CA_ISSUERS_METHOD and tag == _URI_TAG:
                 urls.append(location.decode('latin1'))
-    except (ValueError, IndexError):
+    except ValueError, IndexError:
         pass
     return urls
 
@@ -42,7 +42,7 @@ def _http_get(url: str, timeout: float) -> bytes | None:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return resp.read(1 << 20)               # a CA cert is a few KB; cap at 1 MiB
-    except (urllib.error.URLError, OSError, ValueError):
+    except urllib.error.URLError, OSError, ValueError:
         return None
 
 

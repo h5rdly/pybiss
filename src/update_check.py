@@ -19,7 +19,7 @@ def _os_token() -> str:
 def _is_newer(latest: str, current: str) -> bool:
     try:
         return Decimal(latest) > Decimal(current)
-    except (InvalidOperation, TypeError):
+    except InvalidOperation, TypeError:
         return False
 
 
@@ -36,7 +36,7 @@ def check_for_update(current_version: str, *, os_token: str = None, timeout: flo
             body = resp.read(8192).decode('utf-8', 'replace')
         data = json.loads(body)                 # Content-Type says html, body is json
         latest = str(data['bissVersion'])
-    except (urllib.error.URLError, OSError, ValueError, KeyError, TimeoutError):
+    except urllib.error.URLError, OSError, ValueError, KeyError, TimeoutError:
         return None
 
     return {

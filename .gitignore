@@ -20,3 +20,6 @@ dist/
 *.egg-info/
 
 pybiss.log
+
+*.jar
+*.pkg.tar.xz

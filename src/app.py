@@ -168,7 +168,7 @@ def gen_spkac(req, payload):
 
     try:
         key_size = int(payload.get('keySize') or 2048)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.request.bad-type')}
 
     key_id = (payload.get('serialNum') or 'btrust-renewal').encode('utf-8')[:16]
@@ -274,7 +274,7 @@ def gen_rsa_pair(req, payload):
     key_id = (payload.get('serNum') or payload.get('keyId') or 'btrust-key').encode('utf-8')[:16]
     try:
         key_size = int(payload.get('keySize') or 2048)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.request.bad-type')}
 
     ui_provider = get_ui_provider()
@@ -307,7 +307,7 @@ def renew_cert(req, payload):
 
     try:
         key_size = int(payload.get('keySize') or 2048)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return {'status': 'error', 'reasonCode': 400, 'reasonText': reason('error.request.bad-type')}
     key_id = (payload.get('serNum') or payload.get('keyId') or 'RENEWAL').encode('utf-8')[:16]
 
