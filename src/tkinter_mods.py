@@ -171,14 +171,30 @@ class Font:
     FAMILY = 'Segoe UI'       # overridden by apply(); resolve() picks a real one
     FONT = (FAMILY, 12)       # default (family, size) used by Label/Entry/Button
 
+    MONO = ('Hack', 'DejaVu Sans Mono', 'Consolas', 'Menlo', 'Liberation Mono',
+            'Courier New', 'Monaco', 'Courier')
+
+    @classmethod
+    def _installed(cls):
+        return {f.lower() for f in tkfont.families()}
+
+    @classmethod
+    def _first_present(cls, families, have):
+        return next((f for f in families if f.lower() in have), None)
+
     @classmethod
     def resolve(cls, preferred):
-        ''' The configured family if the system has it, else the OS/Tk default UI
-            family (what Tk substitutes anyway). Needs a Tk root to exist. '''
+        ''' The configured family if the system has it, else the first available
+            monospace fallback, else the Tk default. Needs a Tk root to exist. '''
 
-        if preferred and preferred.lower() in {f.lower() for f in tkfont.families()}:
+        have = cls._installed()
+        if preferred and preferred.lower() in have:
             return preferred
-        return tkfont.nametofont('TkDefaultFont').actual('family')
+        return cls._first_present(cls.MONO, have) or tkfont.nametofont('TkDefaultFont').actual('family')
+
+    @classmethod
+    def resolve_mono(cls):
+        return cls._first_present(cls.MONO, cls._installed()) or tkfont.nametofont('TkFixedFont').actual('family')
 
     @classmethod
     def apply(cls, family):
@@ -2442,7 +2458,9 @@ def filedialog_parent(path):
 
 def filedialog_places(home=None, volumes=None):
     ''' (label, path) pairs for the places list: the home directory, its usual folders
-        that exist, the root (or drives) and mounted volumes. '''
+        that exist, the root (or drives) and mounted volumes. An explicit `volumes`
+        list is honoured on every platform; when None they are auto-discovered (drive
+        letters on Windows, the usual mount dirs elsewhere). '''
 
     home = home or os.path.expanduser('~')
     out = [('Home', home)]
@@ -2451,10 +2469,8 @@ def filedialog_places(home=None, volumes=None):
         if os.path.isdir(p):
             out.append((name, p))
     if sys.platform.startswith('win'):
-        for letter in 'CDEFGHIJKLMNOPQRSTUVWXYZ':
-            d = letter + ':\\'
-            if os.path.isdir(d):
-                out.append((d, d))
+        if volumes is None:
+            volumes = [l + ':\\' for l in 'CDEFGHIJKLMNOPQRSTUVWXYZ' if os.path.isdir(l + ':\\')]
     else:
         out.append(('/', '/'))
         if volumes is None:
@@ -2465,9 +2481,10 @@ def filedialog_places(home=None, volumes=None):
                     volumes += [os.path.join(base, n) for n in sorted(os.listdir(base))]
                 except OSError:
                     pass
-        for v in volumes:
-            if os.path.isdir(v) and (v, v) not in out:
-                out.append((v.rstrip('/').rsplit('/', 1)[-1] or v, v))
+    for v in volumes:
+        if os.path.isdir(v) and (v, v) not in out:
+            label = v if v.endswith((':\\', ':/')) else (v.replace('\\', '/').rstrip('/').rsplit('/', 1)[-1] or v)
+            out.append((label, v))
     return out
 
 

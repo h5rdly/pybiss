@@ -33,7 +33,7 @@ jobs:
         # (glibc); musl/mac legs skip it. pcscd (the daemon, not just the client
         # lib) so the live-handshake test can talk to a real daemon below.
         run: |
-          sudo apt-get update && sudo apt-get install -y pcscd libpcsclite1 tk xvfb
+          sudo apt-get update && sudo apt-get install -y pcscd libpcsclite1 tk xvfb fonts-dejavu-core
           sudo locale-gen bg_BG.UTF-8
 
       # Loads this platform's PC/SC library through src/sc_types and binds every

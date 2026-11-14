@@ -52,11 +52,15 @@ def hack_available() -> bool:
         return False
 
 
-def download_hack(url: str = HACK_URL, timeout: float = 60) -> dict:
-    '''
-    Download + hash-verify the Hack zip, install its four TTFs into the user font
-    dir, and on Windows register them for this session
-    '''
+def download_hack(url: str = HACK_URL, timeout: float = 60, force: bool = False) -> dict:
+    '''Ensure the Hack font is installed, fetching it over urllib when needed'''
+
+    dest = user_font_dir()
+    installed = [dest / Path(m).name for m in _MEMBERS]
+
+    if not force and all(p.exists() for p in installed):
+        return {'family': HACK_FAMILY, 'installed': installed,
+                'session_ready': hack_available(), 'downloaded': False}
 
     with urllib.request.urlopen(url, timeout=timeout) as resp:
         data = resp.read()
@@ -66,14 +70,10 @@ def download_hack(url: str = HACK_URL, timeout: float = 60) -> dict:
         raise ValueError(f'Hack zip hash mismatch: got {digest}, expected {HACK_SHA256}. '
                          'Upstream may have republished - re-vet before trusting it.')
 
-    dest = user_font_dir()
     dest.mkdir(parents=True, exist_ok=True)
-    installed = []
     with zipfile.ZipFile(io.BytesIO(data)) as z:
-        for member in _MEMBERS:
-            out = dest / Path(member).name
+        for out, member in zip(installed, _MEMBERS):
             out.write_bytes(z.read(member))
-            installed.append(out)
 
     session_ready = False
     if sys.platform.startswith('win'):
@@ -88,4 +88,5 @@ def download_hack(url: str = HACK_URL, timeout: float = 60) -> dict:
         if shutil.which('fc-cache'):
             subprocess.run(['fc-cache', '-f', str(dest)], capture_output=True)
 
-    return {'family': HACK_FAMILY, 'installed': installed, 'session_ready': session_ready}
+    return {'family': HACK_FAMILY, 'installed': installed,
+            'session_ready': session_ready, 'downloaded': True}

@@ -22,7 +22,7 @@ _SRC = __file__.replace('\\', '/').rsplit('/', 2)[0] + '/src'
 try:
     import tkinter as tk
     from src.tkinter_mods import (
-        Window, Toplevel, Button, Entry, Toggle, Textbox, Listbox, Theme,
+        Window, Toplevel, Button, Entry, Toggle, Textbox, Listbox, Theme, Font,
     )
     from src.dashboard import DesktopDashboard
     _TK_IMPORTABLE = True
@@ -39,6 +39,7 @@ if _TK_IMPORTABLE and not os.environ.get('PYBISS_SKIP_GUI_TESTS'):
         _SHARED_ROOT = Window(title='pybiss-tests')
         _SHARED_ROOT.withdraw()
         _SHARED_ROOT._dpi_scale = 1.0
+        Font.apply(Font.resolve_mono())   # real monospace metrics, not the 6px bitmap fallback
 
         def _destroy_shared_root():
             try:

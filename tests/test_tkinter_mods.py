@@ -6,7 +6,7 @@ sys.path.append(__file__.replace('\\', '/').rsplit('/', 2)[0])
 try:
     from src.tkinter_mods import (
         detect_system_theme, _even, scrollbar_thumb_bounds, scrollbar_drag_start,
-        get_window_dpi_scale, DpiTracker, Window, Theme, Label, Button, Entry,
+        get_window_dpi_scale, DpiTracker, Window, Theme, Label, Button, Entry, Font,
     )
 except ImportError as e:
     raise unittest.SkipTest(f'tkinter not available on this platform: {e}')
@@ -482,6 +482,7 @@ class TestListViewWidget(unittest.TestCase):
             raise unittest.SkipTest(f'no Tk display: {e}')
         cls.win.withdraw()
         cls.win._dpi_scale = 1.0        # geometry at 100% DPI (match CI, not a HiDPI display)
+        Font.apply(Font.resolve_mono()) # a real monospace advance, not the 6px bitmap fallback
 
     @classmethod
     def tearDownClass(cls):
@@ -648,6 +649,7 @@ class TestListViewColumns(unittest.TestCase):
             raise unittest.SkipTest(f'no Tk display: {e}')
         cls.win.withdraw()
         cls.win._dpi_scale = 1.0        # geometry at 100% DPI (match CI, not a HiDPI display)
+        Font.apply(Font.resolve_mono()) # a real monospace advance, not the 6px bitmap fallback
 
     @classmethod
     def tearDownClass(cls):
@@ -958,7 +960,10 @@ class TestFileDialogHelpers(unittest.TestCase):
         assert filedialog_resolve('../a.torrent', cwd) == os.path.join(self.tmp, 'a.torrent')
         assert filedialog_resolve('~', cwd) == os.path.expanduser('~')
         assert filedialog_resolve(self.tmp + '/', cwd) == self.tmp
-        assert filedialog_resolve('/x/./y/../z', cwd) == os.path.normpath('/x/z')
+        if sys.platform.startswith('win'):            # a lone '/x' is drive-relative on Windows
+            assert filedialog_resolve('C:/x/./y/../z', cwd) == os.path.normpath('C:/x/z')
+        else:
+            assert filedialog_resolve('/x/./y/../z', cwd) == os.path.normpath('/x/z')
 
     def test_parent_stops_at_the_root(self):
         assert filedialog_parent(os.path.join(self.tmp, 'sub')) == self.tmp
@@ -1022,6 +1027,7 @@ class TestFileDialogWidget(unittest.TestCase):
             raise unittest.SkipTest(f'no Tk display: {e}')
         cls.win.withdraw()
         cls.win._dpi_scale = 1.0        # geometry at 100% DPI (match CI, not a HiDPI display)
+        Font.apply(Font.resolve_mono()) # a real monospace advance, not the 6px bitmap fallback
 
     @classmethod
     def tearDownClass(cls):
